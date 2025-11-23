@@ -11,7 +11,13 @@ from queue import Empty, Queue
 from typing import Any, Deque, Dict, Iterable, Optional
 
 from behaviors import Behavior, get_behavior
-from constants import CONTROLLER_MODE, CONTROL_PERIOD_MS, LOG_CONFIGS, VBAT_MIN
+from constants import (
+    CONTROLLER_MODE,
+    CONTROL_PERIOD_MS,
+    LOG_CONFIGS,
+    MAX_FLIGHT_TIME_S,
+    VBAT_MIN,
+)
 from logger import SensorSample
 
 LOGGER = logging.getLogger(__name__)
@@ -74,6 +80,7 @@ class CrazyflieController:
         self._last_sample: Optional[SensorSample] = None
         self._behavior: Behavior = get_behavior(mode, cf)
         self._behavior_stopped = False
+        self._start_time: Optional[float] = None
 
     def start(self) -> None:
         """Start the background control loop."""
@@ -83,6 +90,7 @@ class CrazyflieController:
 
         self._behavior_stopped = False
         self._stop_event.clear()
+        self._start_time = time.monotonic()
         try:
             self._behavior.on_start()
         except Exception:  # noqa: BLE001
@@ -168,6 +176,14 @@ class CrazyflieController:
             LOGGER.warning("Battery low (%.2f V < %.2f V); stopping controller", float(vbat), VBAT_MIN)
             self._stop_event.set()
             return True
+        if MAX_FLIGHT_TIME_S is not None and self._start_time is not None:
+            if time.monotonic() - self._start_time >= MAX_FLIGHT_TIME_S:
+                LOGGER.warning(
+                    "Max flight time %.1f s exceeded; stopping controller",
+                    MAX_FLIGHT_TIME_S,
+                )
+                self._stop_event.set()
+                return True
         return False
 
     def _step(self, sample: SensorSample) -> None:

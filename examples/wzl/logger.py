@@ -11,10 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from cflib.crazyflie.log import LogConfig
 
-try:  # Local execution (python examples/wzl/main.py)
-    from constants import LOG_CONFIGS
-except ImportError:  # Package-style execution (python -m examples.wzl.main)
-    from .constants import LOG_CONFIGS  # type: ignore[F401]
+from constants import LOG_CONFIGS
+
 
 
 LOGGER = logging.getLogger(__name__)
@@ -121,18 +119,18 @@ class CrazyflieLogger:
         LOGGER.error("Log config '%s' reported error: %s", logconf.name, msg)
 
     def _push_sample(self, sample: SensorSample) -> None:
+        """Push a sample into the queue, dropping the oldest if full."""
         try:
             self._queue.put_nowait(sample)
         except Full:
             try:
-                self._queue.get_nowait()  # drop one
+                self._queue.get_nowait()
             except Empty:
                 pass
-            # Second attempt; if this fails again we just drop the new sample
             try:
                 self._queue.put_nowait(sample)
             except Full:
-                LOGGER.warning("Dropping log sample due to full queue")
+                pass
 
     @staticmethod
     def _parse_variable_entry(entry: Any, log_name: str) -> Tuple[Optional[str], Optional[str]]:

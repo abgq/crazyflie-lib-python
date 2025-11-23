@@ -12,14 +12,10 @@ import cflib.crtp
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 
-try:  # Local execution (python examples/wzl/main.py)
-    from constants import CF_URI, CONTROLLER_MODE, LOG_CONFIGS, QUEUE_MAX_SIZE
-    from controller import CrazyflieController
-    from logger import CrazyflieLogger, SensorSample
-except ImportError:  # Package-style execution (python -m examples.wzl.main)
-    from .constants import CF_URI, CONTROLLER_MODE, LOG_CONFIGS, QUEUE_MAX_SIZE  # type: ignore[F401]
-    from .controller import CrazyflieController  # type: ignore[F401]
-    from .logger import CrazyflieLogger, SensorSample  # type: ignore[F401]
+from constants import CF_URI, CONTROLLER_MODE, LOG_CONFIGS, QUEUE_MAX_SIZE
+from controller import CrazyflieController
+from logger import CrazyflieLogger, SensorSample
+
 
 
 LOGGER = logging.getLogger(__name__)
