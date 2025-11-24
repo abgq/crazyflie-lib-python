@@ -6,6 +6,7 @@ import logging
 import numbers
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections import deque
 from queue import Empty, Queue
 from typing import Any, Deque, Dict, Iterable, Optional
@@ -21,31 +22,143 @@ from logger import SensorSample
 
 LOGGER = logging.getLogger(__name__)
 
-class MovingAverageFilter:
-    """Independent moving-average filters per variable."""
 
-    def __init__(self, window_sizes: Dict[str, int]) -> None:
+class SignalFilter(ABC):
+    """Abstract base class for signal filters."""
+
+    @abstractmethod
+    def update(self, value: float) -> float:
+        """Process a new sample and return the filtered value."""
+
+
+class NoFilter(SignalFilter):
+    """Returns the value immediately without modification."""
+
+    def update(self, value: float) -> float:
+        return value
+
+
+class MovingAverageFilter(SignalFilter):
+    """Simple Moving Average (SMA) filter."""
+
+    def __init__(self, window_size: int) -> None:
+        self.window_size = int(window_size)
+        self.buffer: Deque[float] = deque(maxlen=self.window_size)
+
+    def update(self, value: float) -> float:
+        if self.window_size <= 0:
+            return value
+        self.buffer.append(value)
+        return sum(self.buffer) / len(self.buffer)
+
+
+class ExponentialFilter(SignalFilter):
+    """Exponential Moving Average (EMA) filter."""
+
+    def __init__(self, alpha: float) -> None:
+        self.alpha = float(alpha)
+        self.last_value: Optional[float] = None
+
+    def update(self, value: float) -> float:
+        if self.last_value is None:
+            self.last_value = value
+            return value
+        self.last_value = self.alpha * value + (1 - self.alpha) * self.last_value
+        return self.last_value
+
+
+class FilterBank:
+    """Manages a collection of filters mapped to variable names."""
+
+    def __init__(self, log_configs: Iterable[Dict[str, Any]]) -> None:
         """
         Args:
-            window_sizes: Mapping between variable name and window length.
+            log_configs: List of log configuration dictionaries.
         """
-        self.window_sizes = {name: int(size) for name, size in window_sizes.items()}
-        self.buffers: Dict[str, Deque[float]] = {}
-        self._enabled = any(size > 0 for size in self.window_sizes.values())
+        self.filters: Dict[str, SignalFilter] = {}
+        self._enabled = False
+
+        for cfg in log_configs:
+            cfg_name = cfg.get("name", "unnamed")
+            for entry in cfg.get("variables", []):
+                name, filter_instance = self._create_filter_for_entry(entry, cfg_name)
+                if name:
+                    self.filters[name] = filter_instance
+                    if not isinstance(filter_instance, NoFilter):
+                        self._enabled = True
 
     def is_enabled(self) -> bool:
         """Return ``True`` if any variable requests filtering."""
         return self._enabled
 
     def update(self, name: str, value: float) -> float:
-        """Return the filtered value for ``name`` given a new ``value`` sample."""
-        window_size = self.window_sizes.get(name, 0)
-        if window_size <= 0:
-            return value
+        """Return the filtered value for ``name``.
 
-        buf = self.buffers.setdefault(name, deque(maxlen=window_size))
-        buf.append(value)
-        return sum(buf) / len(buf)
+        Raises:
+            ValueError: If ``name`` is not a known variable.
+        """
+        if name not in self.filters:
+            raise ValueError(f"Unknown variable '{name}' in FilterBank update")
+        return self.filters[name].update(value)
+
+    def _create_filter_for_entry(self, entry: Any, log_name: str) -> tuple[Optional[str], SignalFilter]:
+        """Parse a config entry and return (variable_name, FilterInstance)."""
+        if isinstance(entry, str):
+            return entry, NoFilter()
+
+        if isinstance(entry, dict):
+            name = entry.get("name")
+            if not name:
+                LOGGER.warning("Variable entry without name in log config '%s'", log_name)
+                return None, NoFilter()
+
+            filter_cfg = entry.get("filter")
+
+            # Support legacy "filter_window" key if present and no "filter" dict
+            # This maintains backward compatibility if needed, but the prompt says
+            # "Parsing Logic: ... Look for a 'filter' key".
+            # However, the prompt specifically discusses refactoring.
+            # I will stick to the new spec: Look for "filter" key.
+            # If "filter_window" was there, it would be ignored unless I added logic.
+            # Given the strict task, I will stick to "filter" dict logic.
+            # But wait, the prompt says "Iterate through the variables... Look for a 'filter' key".
+            # It does not explicitly forbid legacy handling, but usually refactoring implies moving forward.
+            # I'll stick to the "filter" key logic as requested.
+
+            if not filter_cfg or not isinstance(filter_cfg, dict):
+                # Fallback to check for legacy filter_window if we want to be nice?
+                # The prompt implies we are rewriting the config, so maybe not needed.
+                # Actually, I'll stick to the requested logic:
+                # "Otherwise (or if the key is missing), create NoFilter."
+                return str(name), NoFilter()
+
+            ftype = filter_cfg.get("type")
+
+            if ftype == "SMA":
+                window = filter_cfg.get("window", 0)
+                try:
+                    w_int = int(window)
+                    if w_int > 0:
+                        return str(name), MovingAverageFilter(w_int)
+                except (ValueError, TypeError):
+                    LOGGER.warning("Invalid SMA window '%s' for '%s'", window, name)
+                # Fallback
+                return str(name), NoFilter()
+
+            elif ftype == "EMA":
+                alpha = filter_cfg.get("alpha", 1.0)
+                try:
+                    a_float = float(alpha)
+                    return str(name), ExponentialFilter(a_float)
+                except (ValueError, TypeError):
+                    LOGGER.warning("Invalid EMA alpha '%s' for '%s'", alpha, name)
+                return str(name), NoFilter()
+
+            # Type "None" or unknown
+            return str(name), NoFilter()
+
+        LOGGER.warning("Unsupported variable entry %r in log config '%s'", entry, log_name)
+        return None, NoFilter()
 
 
 class CrazyflieController:
@@ -75,7 +188,10 @@ class CrazyflieController:
         self._log_configs = list(log_configs or LOG_CONFIGS)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._filter = MovingAverageFilter(self._extract_filter_windows(self._log_configs))
+
+        # New FilterBank initialization
+        self._filter = FilterBank(self._log_configs)
+
         self._last_sample: Optional[SensorSample] = None
         self._behavior: Behavior = get_behavior(mode, cf)
         self._behavior_stopped = False
@@ -170,7 +286,24 @@ class CrazyflieController:
         filtered_values = dict(sample.values)
         for name, value in sample.values.items():
             if isinstance(value, numbers.Real):
-                filtered_values[name] = self._filter.update(name, float(value))
+                try:
+                    filtered_values[name] = self._filter.update(name, float(value))
+                except ValueError:
+                    # FilterBank raises ValueError for unknown variables.
+                    # We should just keep the raw value in that case.
+                    # However, strictly speaking, the FilterBank is initialized with the same log_configs
+                    # as the Logger, so all variables logged *should* be in the FilterBank.
+                    # If an unknown variable appears, it might be from a different source or dynamic.
+                    # Given the instruction "This should cause an error", I should probably let it crash or log it?
+                    # The instruction "1. Actually this should cause an error" referred to `FilterBank.update`.
+                    # So `FilterBank.update` raises the error.
+                    # If I catch it here and suppress it, I'm hiding the error.
+                    # If I don't catch it, the loop might crash (caught in _run_loop).
+                    # I will NOT catch it here, allowing the error to propagate as requested.
+                    # Re-reading: "1. Actually this should cause an error. Good catch. Fix this as well."
+                    # This implies I should let it be an error.
+                    filtered_values[name] = self._filter.update(name, float(value))
+
         return SensorSample(timestamp=sample.timestamp, values=filtered_values)
 
     def _check_safety(self, sample: SensorSample) -> bool:
@@ -189,40 +322,3 @@ class CrazyflieController:
         except Exception:  # noqa: BLE001
             LOGGER.exception("Behavior.step() raised an exception")
             self._stop_event.set()
-
-    @staticmethod
-    def _extract_filter_windows(log_configs: Iterable[Dict[str, Any]]) -> Dict[str, int]:
-        """Build a mapping of variable name -> filter window size."""
-        windows: Dict[str, int] = {}
-        for cfg in log_configs:
-            cfg_name = cfg.get("name", "unnamed")
-            for entry in cfg.get("variables", []):
-                name, window = CrazyflieController._parse_variable_entry(entry, cfg_name)
-                if name:
-                    windows[name] = max(0, window)
-        return windows
-
-    @staticmethod
-    def _parse_variable_entry(entry: Any, log_name: str) -> tuple[Optional[str], int]:
-        """Normalize a log variable entry."""
-        if isinstance(entry, str):
-            return entry, 0
-        if isinstance(entry, dict):
-            name = entry.get("name")
-            if not name:
-                LOGGER.warning("Variable entry without name in log config '%s'", log_name)
-                return None, 0
-            raw_window = entry.get("filter_window", 0)
-            try:
-                window = int(raw_window)
-            except (TypeError, ValueError):
-                LOGGER.warning(
-                    "Invalid filter_window '%s' for variable '%s' in log config '%s'",
-                    raw_window,
-                    name,
-                    log_name,
-                )
-                window = 0
-            return str(name), window
-        LOGGER.warning("Unsupported variable entry %r in log config '%s'", entry, log_name)
-        return None, 0

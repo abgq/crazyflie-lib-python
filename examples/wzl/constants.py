@@ -19,7 +19,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "pm.vbat",
-                "filter_window": 0,  # 0 disables filtering for this variable
+                # No filter configuration (defaulting to NoFilter)
             },
         ],
     },
@@ -29,7 +29,10 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "dw1k.rangingCounter",
-                "filter_window": 25,  # Moving average over the last 25 samples
+                "filter": {
+                    "type": "EMA",
+                    "alpha": 0.25
+                }
             },
         ],
     },
