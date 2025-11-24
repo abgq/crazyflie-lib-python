@@ -29,7 +29,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "dw1k.rangingCounter",
-                "filter_window": 20,  # Moving average over the last 20 samples
+                "filter_window": 25,  # Moving average over the last 25 samples
             },
         ],
     },
@@ -42,16 +42,13 @@ CONTROL_PERIOD_MS: int = 500
 VBAT_MIN: float = 3.3
 """Minimum safe battery voltage, in volts."""
 
-MAX_FLIGHT_TIME_S: float | None = None
-"""Optional safety limit for controller runtime in seconds (``None`` disables)."""
-
 QUEUE_MAX_SIZE: int = 100
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
 CONTROLLER_MODE: str = "probe"
 """
 Default controller mode. Options: 'idle', 'wzl', 'probe', 'demo_motion',
-and 'demo_highlevel'. Default is 'probe'.
+and 'demo_highlevel'. Default is 'idle'.
 """
 
 # --- DW1000 / UWB calibration constants ---
@@ -77,7 +74,6 @@ __all__ = [
     "LOG_CONFIGS",
     "CONTROL_PERIOD_MS",
     "VBAT_MIN",
-    "MAX_FLIGHT_TIME_S",
     "QUEUE_MAX_SIZE",
     "CONTROLLER_MODE",
     "SPEED_OF_LIGHT",

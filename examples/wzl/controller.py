@@ -15,7 +15,6 @@ from constants import (
     CONTROLLER_MODE,
     CONTROL_PERIOD_MS,
     LOG_CONFIGS,
-    MAX_FLIGHT_TIME_S,
     VBAT_MIN,
 )
 from logger import SensorSample
@@ -80,7 +79,6 @@ class CrazyflieController:
         self._last_sample: Optional[SensorSample] = None
         self._behavior: Behavior = get_behavior(mode, cf)
         self._behavior_stopped = False
-        self._start_time: Optional[float] = None
 
     def start(self) -> None:
         """Start the background control loop."""
@@ -90,7 +88,6 @@ class CrazyflieController:
 
         self._behavior_stopped = False
         self._stop_event.clear()
-        self._start_time = time.monotonic()
         try:
             self._behavior.on_start()
         except Exception:  # noqa: BLE001
@@ -127,16 +124,18 @@ class CrazyflieController:
         try:
             while not self._stop_event.is_set():
                 loop_start = time.time()
-                latest = self._drain_latest_sample()
+                
+                # Fetch the latest sample (processing all intermediate ones in the filter)
+                latest_filtered = self._drain_latest_sample()
 
-                if latest is not None:
-                    self._last_sample = latest
+                if latest_filtered is not None:
+                    self._last_sample = latest_filtered
 
+                # Use _last_sample directly (it is already filtered)
                 if self._last_sample is not None:
-                    filtered_sample = self._apply_filters(self._last_sample)
-                    if self._check_safety(filtered_sample):
+                    if self._check_safety(self._last_sample):
                         break
-                    self._step(filtered_sample)
+                    self._step(self._last_sample)
 
                 elapsed = time.time() - loop_start
                 sleep_time = max(0.0, period_s - elapsed)
@@ -149,14 +148,19 @@ class CrazyflieController:
             LOGGER.info("Controller loop stopped")
 
     def _drain_latest_sample(self) -> Optional[SensorSample]:
-        """Return the most recent sample from the queue, draining older entries."""
-        latest: Optional[SensorSample] = None
+        """
+        Drain the queue, apply filters to ALL samples to update state,
+        and return the most recent filtered sample.
+        """
+        latest_filtered: Optional[SensorSample] = None
         while True:
             try:
-                latest = self._queue.get_nowait()
+                raw_sample = self._queue.get_nowait()
+                # Apply filter immediately to every sample to keep history correct
+                latest_filtered = self._apply_filters(raw_sample)
             except Empty:
                 break
-        return latest
+        return latest_filtered
 
     def _apply_filters(self, sample: SensorSample) -> SensorSample:
         """Apply per-variable moving averages when enabled."""
@@ -176,14 +180,6 @@ class CrazyflieController:
             LOGGER.warning("Battery low (%.2f V < %.2f V); stopping controller", float(vbat), VBAT_MIN)
             self._stop_event.set()
             return True
-        if MAX_FLIGHT_TIME_S is not None and self._start_time is not None:
-            if time.monotonic() - self._start_time >= MAX_FLIGHT_TIME_S:
-                LOGGER.warning(
-                    "Max flight time %.1f s exceeded; stopping controller",
-                    MAX_FLIGHT_TIME_S,
-                )
-                self._stop_event.set()
-                return True
         return False
 
     def _step(self, sample: SensorSample) -> None:
