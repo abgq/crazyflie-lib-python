@@ -130,7 +130,7 @@ class CrazyflieLogger:
             try:
                 self._queue.put_nowait(sample)
             except Full:
-                pass
+                LOGGER.error("Failed to push sample into full queue")
 
     @staticmethod
     def _parse_variable_entry(entry: Any, log_name: str) -> Tuple[Optional[str], Optional[str]]:

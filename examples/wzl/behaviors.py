@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
+from enum import Enum, auto
+
 from cflib.positioning.motion_commander import MotionCommander
 
 from logger import SensorSample
@@ -20,6 +22,18 @@ from cflib.crazyflie import Crazyflie
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ProbeState(Enum):
+    PROBE = auto()
+    MOVE = auto()
+
+
+class ProbePhase(Enum):
+    IDLE = auto()
+    FORWARD = auto()
+    BACK = auto()
+
 
 def ranging_counter_to_distance(counter: int) -> float:
     """Convert DW1K ranging counter units to distance in meters.
@@ -401,14 +415,19 @@ class ProbeBehavior(Behavior):
     # Tweak these as needed or move to constants.py later.
     _DISTANCE_THRESHOLD_COUNTER = 66200  # Counter threshold (raw units) to stop
 
-    _MOVE_SPEED_MPS = 0.25  # Speed during main move [m/s]
-    _MOVE_DURATION_S = 4.0  # Max time to stay in move phase before re-probing [s]
+    _MOVE_SPEED_MPS = 0.40  # Speed during main move [m/s]
+    _MOVE_DURATION_S = 5.0  # Max time to stay in move phase before re-probing [s]
 
     _MIN_IMPROVEMENT_COUNTER = 100  # Minimum counter improvement to consider "better"
 
-    _PROBE_SPEED_MPS = 0.20  # Speed during probing moves [m/s]
-    _PROBE_DURATION_S = 3.0  # Duration of each probe leg (forward/back) [s]
-    _NO_IMPROVEMENT_TIMEOUT_S = 5.0  # Safety: re-probe if no progress for this long
+    _PROBE_SPEED_MPS = 0.30  # Speed during probing moves [m/s]
+    _PROBE_DURATION_S = 5.0  # Duration of each probe leg (forward/back) [s]
+
+    _NO_IMPROVEMENT_TIMEOUT_S = 10.0  # Safety: re-probe if no progress for this long
+
+    def halve_speeds(self) -> None:
+        self._MOVE_SPEED_MPS *= 0.5
+        self._PROBE_SPEED_MPS *= 0.5
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -424,8 +443,7 @@ class ProbeBehavior(Behavior):
         self._last_counter: float | None = None
 
         # High-level behavior state
-        # probe | move
-        self._state = "probe"
+        self._state: ProbeState = ProbeState.PROBE
 
         # Probe-related state
         # Directions in body frame: +x, -x, +y, -y
@@ -441,7 +459,7 @@ class ProbeBehavior(Behavior):
         self._move_dir: tuple[float, float] | None = None
 
         # Dynamic probe bookkeeping
-        self._probe_phase = "idle"  # idle | forward | back
+        self._probe_phase: ProbePhase = ProbePhase.IDLE
         self._probe_leg_start_time = 0.0
         self._probe_start_counter = None
         self._probe_leg_min_counter = None
@@ -460,8 +478,8 @@ class ProbeBehavior(Behavior):
         except Exception:
             self._log.debug("Failed to stop during move->probe transition", exc_info=True)
         self._moving = False
-        self._state = "probe"
-        self._probe_phase = "idle"
+        self._state = ProbeState.PROBE
+        self._probe_phase = ProbePhase.IDLE
         self._probe_index = 0
         self._probe_best_dir = None
         self._probe_best_improvement = 0.0
@@ -479,7 +497,7 @@ class ProbeBehavior(Behavior):
 
             self._mc = MotionCommander(self._cf)
 
-            self._mc.take_off(height=0.5, velocity=0.3)
+            self._mc.take_off(height=0.4, velocity=0.3)
             self._in_air = True
 
             self._log.info(
@@ -501,73 +519,73 @@ class ProbeBehavior(Behavior):
         counter = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
 
-        # Log counter at 0.2 Hz
+        # Log counter at 1.0 Hz
         now = time.monotonic()
         if now - self._last_log >= 5.0:
             self._last_log = now
             if isinstance(counter, (int, float)) and isinstance(vbattery, (int, float)):
                 self._log.info(
-                    "ProbeBehavior: UWB counter: %d - Battery: %.2f V",
+                    "UWB counter: %d - Battery: %.2f V",
                     int(counter),
                     float(vbattery),
                 )
             else:
                 self._log.info(
-                    "ProbeBehavior: missing/invalid data – counter=%r, vbat=%r",
+                    "Missing/invalid data - counter=%r, vbat=%r",
                     counter,
                     vbattery,
                 )
 
         if counter is None:
-            self._log.warning("ProbeBehavior: no rangingCounter in sample; ignoring")
+            self._log.warning("No rangingCounter in sample; ignoring")
             return
         if not isinstance(counter, (int, float)):
-            self._log.warning("ProbeBehavior: invalid ranging counter %r; ignoring", counter)
+            self._log.warning("Invalid ranging counter %r; ignoring", counter)
             return
 
-        counter = float(counter)
+        counter = int(counter)
 
         # Initialize last_counter on first valid measurement
         if self._last_counter is None:
             self._last_counter = counter
 
-        if counter <= 0.0:
-            self._log.warning("ProbeBehavior: non-positive ranging counter %r; ignoring", counter)
+        if counter <= 0:
+            self._log.warning("Non-positive ranging counter %r; ignoring", counter)
             return
 
         # Global stop condition: close enough -> stop & land
         if counter <= self._DISTANCE_THRESHOLD_COUNTER:
             if self._moving:
                 self._log.info(
-                    "ProbeBehavior: reached counter threshold (%d <= %d); stopping and landing",
+                    "Reached counter threshold (%d <= %d); stopping and landing",
                     int(counter),
                     self._DISTANCE_THRESHOLD_COUNTER,
                 )
                 try:
                     self._mc.stop()
                 except Exception:
-                    self._log.debug("MotionCommander.stop() failed during threshold stop", exc_info=True)
+                    self._log.info("MotionCommander.stop() failed during threshold stop", exc_info=True)
                 self._moving = False
 
             if self._in_air:
                 try:
                     self._mc.land(0.2)
                 except Exception:
-                    self._log.debug("MotionCommander.land() failed during threshold stop", exc_info=True)
+                    self._log.info("MotionCommander.land() failed during threshold stop", exc_info=True)
                 self._in_air = False
 
             try:
                 self._cf.platform.send_arming_request(False)
             except Exception:
-                self._log.debug("send_arming_request(False) failed during threshold stop", exc_info=True)
+                self._log.info("send_arming_request(False) failed during threshold stop", exc_info=True)
             self._done = True
             return
 
-                # State machine
+        # State machine
         mc = self._mc  # local alias (already checked for None above)
-        if self._state == "probe":
+        if self._state == ProbeState.PROBE:
             # Begin forward leg if not currently moving
-            if self._probe_phase == "idle":
+            if self._probe_phase == ProbePhase.IDLE:
                 vx, vy = self._probe_dirs[self._probe_index]
                 # Use start_linear_motion so _PROBE_SPEED_MPS is a true velocity [m/s]
                 mc.start_linear_motion(
@@ -576,7 +594,7 @@ class ProbeBehavior(Behavior):
                     0.0,
                 )
                 self._moving = True
-                self._probe_phase = "forward"
+                self._probe_phase = ProbePhase.FORWARD
                 self._probe_leg_start_time = time.monotonic()
                 self._probe_start_counter = counter
                 self._probe_leg_min_counter = counter
@@ -587,19 +605,22 @@ class ProbeBehavior(Behavior):
                 self._probe_leg_min_counter = counter
 
             leg_elapsed = time.monotonic() - self._probe_leg_start_time
-            if self._probe_phase == "forward" and leg_elapsed >= self._PROBE_DURATION_S:
+            if self._probe_phase == ProbePhase.FORWARD and leg_elapsed >= self._PROBE_DURATION_S:
                 # Reverse direction for the back leg using the same speed
+                mc.stop()
+                self._moving = False
                 vx, vy = self._probe_dirs[self._probe_index]
                 mc.start_linear_motion(
                     -vx * self._PROBE_SPEED_MPS,
                     -vy * self._PROBE_SPEED_MPS,
                     0.0,
                 )
-                self._probe_phase = "back"
+                self._moving = True
+                self._probe_phase = ProbePhase.BACK
                 self._probe_leg_start_time = time.monotonic()
                 return
 
-            if self._probe_phase == "back" and leg_elapsed >= self._PROBE_DURATION_S:
+            if self._probe_phase == ProbePhase.BACK and leg_elapsed >= self._PROBE_DURATION_S:
                 mc.stop()
                 self._moving = False
                 # Compute improvement for this direction
@@ -612,7 +633,7 @@ class ProbeBehavior(Behavior):
 
                 # Advance to next direction
                 self._probe_index += 1
-                self._probe_phase = "idle"
+                self._probe_phase = ProbePhase.IDLE
                 self._probe_start_counter = None
                 self._probe_leg_min_counter = None
 
@@ -626,16 +647,12 @@ class ProbeBehavior(Behavior):
                             mvy * self._MOVE_SPEED_MPS,
                             0.0,
                         )
-                        self._move_dir = self._probe_best_dir
-                        self._state = "move"
                         self._moving = True
-                        self._last_counter = (
-                            self._probe_best_min_counter
-                            if self._probe_best_min_counter is not None
-                            else counter
-                        )
-                        self._move_phase_start_time = now
-                        self._last_progress_time = now
+                        self._move_dir = self._probe_best_dir
+                        self._state = ProbeState.MOVE
+                        self._last_counter = counter
+                        self._move_phase_start_time = time.monotonic()
+                        self._last_progress_time = time.monotonic()
                         self._log.info(
                             "Probe complete: best dir=%s improvement=%.1f; entering move phase",
                             self._move_dir,
@@ -655,27 +672,28 @@ class ProbeBehavior(Behavior):
                     self._probe_best_min_counter = None
                 return
 
-        elif self._state == "move":
+        elif self._state == ProbeState.MOVE:
             # Evaluate progress; improvement is decrease in counter
             improvement = self._last_counter - counter if self._last_counter is not None else 0.0
             if improvement >= self._MIN_IMPROVEMENT_COUNTER:
                 # Significant progress; update baseline
                 self._last_counter = counter
-                self._last_progress_time = now
+                self._last_progress_time = time.monotonic()
                 return
             if (
                 self._move_phase_start_time is not None
-                and now - self._move_phase_start_time >= self._MOVE_DURATION_S
+                and time.monotonic() - self._move_phase_start_time >= self._MOVE_DURATION_S
             ):
                 self._log.info(
                     "Move phase reached %.1f s; re-probing",
-                    now - self._move_phase_start_time,
+                    time.monotonic() - self._move_phase_start_time,
                 )
+                self.halve_speeds()
                 self._reset_to_probe(mc, counter)
                 return
             if (
                 self._last_progress_time is not None
-                and now - self._last_progress_time >= self._NO_IMPROVEMENT_TIMEOUT_S
+                and time.monotonic() - self._last_progress_time >= self._NO_IMPROVEMENT_TIMEOUT_S
             ):
                 self._log.warning(
                     "No significant improvement for %.1f s; re-probing",
@@ -684,15 +702,15 @@ class ProbeBehavior(Behavior):
                 self._reset_to_probe(mc, counter)
                 return
             # Worsening beyond threshold -> re-enter probe phase
-            if self._last_counter is not None and counter > self._last_counter + self._MIN_IMPROVEMENT_COUNTER:
-                self._log.warning(
-                    "Move phase worsening: counter rose from %.0f to %.0f (>%d); re-probing",
-                    self._last_counter,
-                    counter,
-                    self._MIN_IMPROVEMENT_COUNTER,
-                )
-                self._reset_to_probe(mc, counter)
-                return
+            # if self._last_counter is not None and counter > self._last_counter + self._MIN_IMPROVEMENT_COUNTER:
+            #     self._log.warning(
+            #         "Move phase worsening: counter rose from %.0f to %.0f (>%d); re-probing",
+            #         self._last_counter,
+            #         counter,
+            #         self._MIN_IMPROVEMENT_COUNTER,
+            #     )
+            #     self._reset_to_probe(mc, counter)
+            #     return
             # Minor change (noise) -> keep moving; occasionally refresh baseline
             if improvement > 0:
                 self._last_counter = counter
