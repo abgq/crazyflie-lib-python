@@ -30,7 +30,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
             {
                 "name": "dw1k.rangingCounter",
                 "filter": {
-                    "type": "SMA",
+                    "type": "EMA",
                     "window": 10,
                     "alpha": 0.25
                 }
@@ -40,7 +40,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 
-CONTROL_PERIOD_MS: int = 500
+CONTROL_PERIOD_MS: int = 100
 """Controller loop period in milliseconds."""
 
 VBAT_MIN: float = 3.3
