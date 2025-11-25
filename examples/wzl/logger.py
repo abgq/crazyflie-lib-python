@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import numbers
 import threading
 import time
 from dataclasses import dataclass
@@ -12,8 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from cflib.crazyflie.log import LogConfig
 
 from constants import LOG_CONFIGS
-
-
+from filters import FilterBank
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(slots=True)
 class SensorSample:
     """Snapshot of the latest Crazyflie log values."""
+
     timestamp: float
     values: Dict[str, Any]
 
@@ -45,6 +46,7 @@ class CrazyflieLogger:
         self._cf = cf
         self._queue = sample_queue
         self._log_configs = list(log_configs or LOG_CONFIGS)
+        self._filter = FilterBank(self._log_configs)
         self._lock = threading.Lock()
         self._latest_values: Dict[str, Any] = {}
         self._logconfs: List[LogConfig] = []
@@ -74,7 +76,9 @@ class CrazyflieLogger:
                 try:
                     logconf.add_variable(var_name, fetch_as)
                 except KeyError:
-                    LOGGER.warning("Variable '%s' not found for log config '%s'", var_name, name)
+                    LOGGER.warning(
+                        "Variable '%s' not found for log config '%s'", var_name, name
+                    )
 
             logconf.data_received_cb.add_callback(self._log_callback)
             logconf.error_cb.add_callback(self._log_error_callback)
@@ -100,19 +104,33 @@ class CrazyflieLogger:
                 LOGGER.exception("Failed to stop log config '%s'", logconf.name)
         self._logconfs.clear()
 
-    def _log_callback(self, timestamp: float, data: Dict[str, Any], logconf: LogConfig) -> None:
+    def _log_callback(
+        self, timestamp: float, data: Dict[str, Any], logconf: LogConfig
+    ) -> None:
         """Handle new log data coming from cflib."""
         if not self._running:
             return
 
         now = time.time()
+
+        # Apply filters to a copy of the incoming data
+        filtered_data = dict(data)
+        if self._filter.is_enabled():
+            for name, value in data.items():
+                if isinstance(value, numbers.Real):
+                    try:
+                        filtered_data[name] = self._filter.update(name, float(value))
+                    except ValueError:
+                        # No filter configured for this variable, so we keep the raw value.
+                        pass
+
         with self._lock:
-            self._latest_values.update(data)
+            self._latest_values.update(filtered_data)
             snapshot = dict(self._latest_values)
 
         sample = SensorSample(timestamp=now, values=snapshot)
         self._push_sample(sample)
-        LOGGER.debug("Logged data from '%s': %s", logconf.name, data)
+        LOGGER.debug("Logged data from '%s': %s", logconf.name, filtered_data)
 
     def _log_error_callback(self, logconf: LogConfig, msg: str) -> None:
         """Receive log errors from cflib."""
@@ -133,14 +151,18 @@ class CrazyflieLogger:
                 LOGGER.error("Failed to push sample into full queue")
 
     @staticmethod
-    def _parse_variable_entry(entry: Any, log_name: str) -> Tuple[Optional[str], Optional[str]]:
+    def _parse_variable_entry(
+        entry: Any, log_name: str
+    ) -> Tuple[Optional[str], Optional[str]]:
         """Return the variable name and optional type override extracted from ``entry``."""
         if isinstance(entry, str):
             return entry, None
         if isinstance(entry, dict):
             name = entry.get("name")
             if not name:
-                LOGGER.warning("Variable entry without name in log config '%s'", log_name)
+                LOGGER.warning(
+                    "Variable entry without name in log config '%s'", log_name
+                )
                 return None, None
             fetch_as = entry.get("fetch_as")
             return str(name), fetch_as
