@@ -765,10 +765,9 @@ class RunAndTumbleBehavior(Behavior):
     
     # --- Control Parameters for Run & Tumble ---
     SEARCH_VELOCITY_MPS: float = 0.4    # Forward speed when running
-    TUMBLE_RATE_RAD_S: float = 30      # Yaw rate when tumbling (searching)
+    TUMBLE_RATE_DEG_S: float = 75      # Yaw rate when tumbling (searching)
     GRADIENT_THRESHOLD_COUNTER: float = 5  # Sensitivity to distance change (counters)
-    TARGET_COUNTER: float = 66200        # Distance to stop from anchor (counters)
-    SLOW_SEARCH_VELOCITY_MPS: float = 0.2 # Default search velocity if no previous action   
+    TARGET_COUNTER: float = 65500        # Distance to stop from anchor (counters) 
 
     FLIGHT_HEIGHT = 0.5
     LANDING_HEIGHT = 0.05
@@ -820,13 +819,13 @@ class RunAndTumbleBehavior(Behavior):
         counter = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
 
-        if not isinstance(raw_counter, (int, float))
-        if not isinstance(counter, (int, float)):
-            return  # Wait for valid data
+        if counter is None or vbattery is None:
+            self._log.warning("Missing rangingCounter or vbat in sample; ignoring")
+            return
 
-        # Log counter at 1.0 Hz
+        # Log counter with 2 seconds interval
         now = time.monotonic()
-        if now - self._last_log >= 5.0:
+        if now - self._last_log >= 2.0:
             self._last_log = now
             if isinstance(counter, (int, float)) and isinstance(vbattery, (int, float)):
                 self._log.info(
@@ -845,7 +844,7 @@ class RunAndTumbleBehavior(Behavior):
         # Note: TARGET_COUNTER is -1 by default. User requested -1 values.
         # This check might need tuning. If TARGET_COUNTER is -1, this is effectively disabled
         # unless counter becomes -1 or lower (unlikely for UWB).
-        if counter <= TARGET_COUNTER:
+        if counter <= self.TARGET_COUNTER:
             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
         if counter <= self.TARGET_COUNTER:
             self._log.info("Target counter %.1f reached; initiating landing sequence", counter)
@@ -891,8 +890,8 @@ class RunAndTumbleBehavior(Behavior):
         if self._prev_counter is None:
             self._prev_counter = counter
             # Default to slow search if no history
-            self._cf.commander.send_hover_setpoint(SLOW_SEARCH_VELOCITY_MPS, 0.0, 0.0, self.FLIGHT_HEIGHT)
-            self._last_vx = SLOW_SEARCH_VELOCITY_MPS
+            self._cf.commander.send_hover_setpoint(self.SEARCH_VELOCITY_MPS * 0.5, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            self._last_vx = self.SEARCH_VELOCITY_MPS * 0.5
             self._last_yaw_rate = 0.0
             return
 
@@ -911,11 +910,6 @@ class RunAndTumbleBehavior(Behavior):
         vx = self._last_vx
         yaw_rate = self._last_yaw_rate
 
-        log_now = time.monotonic()
-        if log_now - self._last_log >= 1.0:
-            self._last_log = log_now
-            self._log.info("delta_r=%.2f, threshold=%.2f", delta_r, threshold)
-
         if delta_r < -threshold:
             # Getting closer (Run)
             self._log.info("Run: delta_r=%.2f < -%.2f", delta_r, threshold)
@@ -925,7 +919,7 @@ class RunAndTumbleBehavior(Behavior):
             # Getting further (Tumble)
             self._log.info("Tumble: delta_r=%.2f > %.2f", delta_r, threshold)
             vx = self.SEARCH_VELOCITY_MPS * 0.5
-            yaw_rate = self.TUMBLE_RATE_RAD_S
+            yaw_rate = self.TUMBLE_RATE_DEG_S
         else:
             # Noise/Deadband: Maintain previous
             # Check if we have a previous action, if not default (handled by initialization)
