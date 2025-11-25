@@ -767,6 +767,12 @@ class ProbeBehavior(Behavior):
 class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
 
+    FLIGHT_HEIGHT = 0.5
+    LANDING_HEIGHT = 0.05
+    LANDING_STEPS = 20
+    LANDING_SLEEP = 0.1
+    STABILIZE_STEPS = 5  # 0.5 seconds at 0.1s sleep
+
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
         self._mc: MotionCommander | None = None
@@ -784,8 +790,8 @@ class RunAndTumbleBehavior(Behavior):
 
             # Create MotionCommander and takeoff
             self._mc = MotionCommander(self._cf)
-            self._mc.take_off(height=0.5, velocity=0.3)
-            time.sleep(1.0) # Wait for takeoff to stabilize
+            self._mc.take_off(height=self.FLIGHT_HEIGHT, velocity=0.3)
+            time.sleep(1.0)  # Wait for takeoff to stabilize
 
             # Stop the internal MotionCommander thread to avoid conflict with our loop
             thread = getattr(self._mc, "_thread", None)
@@ -810,7 +816,7 @@ class RunAndTumbleBehavior(Behavior):
         raw_counter = sample.values.get("dw1k.rangingCounter")
 
         if not isinstance(raw_counter, (int, float)):
-            return # Wait for valid data
+            return  # Wait for valid data
 
         counter = float(raw_counter)
 
@@ -819,14 +825,14 @@ class RunAndTumbleBehavior(Behavior):
         # This check might need tuning. If TARGET_COUNTER is -1, this is effectively disabled
         # unless counter becomes -1 or lower (unlikely for UWB).
         if counter <= TARGET_COUNTER:
-             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, 0.5)
-             return
+            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            return
 
         # Initialize previous counter if needed
         if self._prev_counter is None:
             self._prev_counter = counter
             # Default to slow search if no history
-            self._cf.commander.send_hover_setpoint(SLOW_SEARCH_VELOCITY_MPS, 0.0, 0.0, 0.5)
+            self._cf.commander.send_hover_setpoint(SLOW_SEARCH_VELOCITY_MPS, 0.0, 0.0, self.FLIGHT_HEIGHT)
             self._last_vx = SLOW_SEARCH_VELOCITY_MPS
             self._last_yaw_rate = 0.0
             return
@@ -863,24 +869,48 @@ class RunAndTumbleBehavior(Behavior):
         self._last_yaw_rate = yaw_rate
 
         # Actuation
-        self._cf.commander.send_hover_setpoint(vx, 0.0, yaw_rate, 0.5)
+        self._cf.commander.send_hover_setpoint(vx, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
 
     def on_stop(self) -> None:
-        """Stop, land, and disarm."""
-        self._active = False
-        try:
-            self._cf.commander.send_stop_setpoint()
-        except Exception:
-             self._log.warning("Failed to send stop setpoint", exc_info=True)
-
-        if self._mc:
-             # Just in case we need to cleanup MC resources, though thread is stopped.
-             pass
+        """Stop, land, and disarm safely."""
+        if not self._mc:
+            return
 
         try:
-             self._cf.platform.send_arming_request(False)
+            # Stabilize
+            for _ in range(self.STABILIZE_STEPS):
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                time.sleep(self.LANDING_SLEEP)
+
+            # Land: Ramp down height
+            start_h = self.FLIGHT_HEIGHT
+            end_h = self.LANDING_HEIGHT
+            steps = self.LANDING_STEPS
+
+            for i in range(steps):
+                # Calculate target height (linear ramp)
+                ratio = (i + 1) / steps
+                current_height = start_h - (start_h - end_h) * ratio
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
+                time.sleep(self.LANDING_SLEEP)
+
         except Exception:
-             self._log.warning("Failed to disarm", exc_info=True)
+            self._log.exception("Error during manual landing sequence")
+        finally:
+            # Cut Power
+            try:
+                self._cf.commander.send_stop_setpoint()
+            except Exception:
+                self._log.warning("Failed to send stop setpoint", exc_info=True)
+
+            # Disarm
+            try:
+                self._cf.platform.send_arming_request(False)
+            except Exception:
+                self._log.warning("Failed to disarm", exc_info=True)
+
+            self._active = False
+            self._mc = None
 
 
 def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
