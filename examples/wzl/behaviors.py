@@ -16,6 +16,11 @@ from constants import (
     DW1K_ANTENNA_DELAY_RC,
     DW1K_RC_TO_SECONDS,
     DW1K_TOF_SCALING,
+    SEARCH_VELOCITY_MPS,
+    TUMBLE_RATE_RAD_S,
+    GRADIENT_THRESHOLD_COUNTER,
+    TARGET_COUNTER,
+    SLOW_SEARCH_VELOCITY_MPS,
 )
 
 from cflib.crazyflie import Crazyflie
@@ -759,6 +764,125 @@ class ProbeBehavior(Behavior):
                 self._log.debug("send_arming_request(False) failed during shutdown", exc_info=True)
 
 
+class RunAndTumbleBehavior(Behavior):
+    """Reactive control strategy using Run & Tumble logic."""
+
+    def __init__(self, cf: "Crazyflie") -> None:
+        super().__init__(cf)
+        self._mc: MotionCommander | None = None
+        self._active: bool = False
+        self._prev_counter: float | None = None
+
+        # State tracking for hysteresis
+        self._last_vx: float = 0.0
+        self._last_yaw_rate: float = 0.0
+
+    def on_start(self) -> None:
+        """Arm, takeoff, and prepare for reactive control."""
+        try:
+            self._cf.platform.send_arming_request(True)
+
+            # Create MotionCommander and takeoff
+            self._mc = MotionCommander(self._cf)
+            self._mc.take_off(height=0.5, velocity=0.3)
+            time.sleep(1.0) # Wait for takeoff to stabilize
+
+            # Stop the internal MotionCommander thread to avoid conflict with our loop
+            thread = getattr(self._mc, "_thread", None)
+            if thread is not None:
+                try:
+                    thread.stop()
+                except Exception:
+                    self._log.warning("Failed to stop MotionCommander thread", exc_info=True)
+
+            self._active = True
+            self._log.info("RunAndTumbleBehavior started")
+
+        except Exception:
+            self._log.exception("RunAndTumbleBehavior failed to start")
+            self._mc = None
+            self._active = False
+
+    def step(self, sample: SensorSample) -> None:
+        if not self._active or not self._mc:
+            return
+
+        raw_counter = sample.values.get("dw1k.rangingCounter")
+
+        if not isinstance(raw_counter, (int, float)):
+            return # Wait for valid data
+
+        counter = float(raw_counter)
+
+        # Arrival Check (Counter decreases as we get closer)
+        # Note: TARGET_COUNTER is -1 by default. User requested -1 values.
+        # This check might need tuning. If TARGET_COUNTER is -1, this is effectively disabled
+        # unless counter becomes -1 or lower (unlikely for UWB).
+        if counter <= TARGET_COUNTER:
+             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, 0.5)
+             return
+
+        # Initialize previous counter if needed
+        if self._prev_counter is None:
+            self._prev_counter = counter
+            # Default to slow search if no history
+            self._cf.commander.send_hover_setpoint(SLOW_SEARCH_VELOCITY_MPS, 0.0, 0.0, 0.5)
+            self._last_vx = SLOW_SEARCH_VELOCITY_MPS
+            self._last_yaw_rate = 0.0
+            return
+
+        delta_r = counter - self._prev_counter
+        self._prev_counter = counter
+
+        # Reactive Logic
+        # Getting closer: delta_r is negative.
+        # delta_r < -THRESHOLD means we are improving fast enough.
+        # THRESHOLD is -1.0. -(-1.0) = 1.0. So if delta_r < 1.0.
+        # This effectively means ALMOST ALWAYS RUN if improving at all (or even degrading slightly).
+        # However, I must follow the structure requested.
+
+        threshold = GRADIENT_THRESHOLD_COUNTER
+
+        vx = self._last_vx
+        yaw_rate = self._last_yaw_rate
+
+        if delta_r < -threshold:
+            # Getting closer (Run)
+            vx = SEARCH_VELOCITY_MPS
+            yaw_rate = 0.0
+        elif delta_r > threshold:
+            # Getting further (Tumble)
+            vx = SEARCH_VELOCITY_MPS * 0.5
+            yaw_rate = TUMBLE_RATE_RAD_S
+        else:
+            # Noise/Deadband: Maintain previous
+            # Check if we have a previous action, if not default (handled by initialization)
+            pass
+
+        self._last_vx = vx
+        self._last_yaw_rate = yaw_rate
+
+        # Actuation
+        self._cf.commander.send_hover_setpoint(vx, 0.0, yaw_rate, 0.5)
+
+    def on_stop(self) -> None:
+        """Stop, land, and disarm."""
+        self._active = False
+        try:
+            self._cf.commander.send_stop_setpoint()
+        except Exception:
+             self._log.warning("Failed to send stop setpoint", exc_info=True)
+
+        if self._mc:
+             # Just in case we need to cleanup MC resources, though thread is stopped.
+             pass
+
+        try:
+             self._cf.platform.send_arming_request(False)
+        except Exception:
+             self._log.warning("Failed to disarm", exc_info=True)
+
+
 def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
     """Return a behavior instance for the requested mode."""
     normalized = (mode or "idle").strip().lower()
@@ -768,6 +892,7 @@ def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
         "demo_highlevel": DemoHighLevelBehavior,
         "wzl": WzlBehavior,
         "probe": ProbeBehavior,
+        "run_tumble": RunAndTumbleBehavior,
     }
 
     behavior_cls = mapping.get(normalized, IdleBehavior)
@@ -783,5 +908,6 @@ __all__ = [
     "DemoHighLevelBehavior",
     "WzlBehavior",
     "ProbeBehavior",
+    "RunAndTumbleBehavior",
     "get_behavior",
 ]
