@@ -52,7 +52,7 @@ QUEUE_MAX_SIZE: int = 100
 CONTROLLER_MODE: str = "run_tumble"
 """
 Default controller mode. Options: 'idle', 'wzl', 'probe', 'demo_motion',
-and 'demo_highlevel'. Default is 'idle'.
+'demo_highlevel', and 'sinusoidal'. Default is 'sinusoidal'.
 """
 
 # --- DW1000 / UWB calibration constants ---
