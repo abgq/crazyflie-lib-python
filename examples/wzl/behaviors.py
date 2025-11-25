@@ -978,7 +978,7 @@ class SinusoidalBehavior(Behavior):
 
     # Tuning Parameters
     VELOCITY_MPS = 0.3          # Forward flight speed
-    DITHER_OMEGA = 4.0          # Frequency of sine wave (rad/s)
+    DITHER_OMEGA = 1.5          # Frequency of sine wave (rad/s)
     DITHER_AMP = 0.5            # Amplitude of sine wave (rad/s)
     GAIN = 25.0                 # Learning rate for the bias (Gradient Gain)
     BIAS_LIMIT = 1.0            # Max yaw bias (rad/s) to prevent spinning
@@ -996,33 +996,34 @@ class SinusoidalBehavior(Behavior):
         self._bias = 0.0
         self._prev_dist: float | None = None
         self._active = False
-        self._mc: MotionCommander | None = None
+
+    def _manual_takeoff(self) -> None:
+        """Take off to a given height using manual setpoints."""
+        # Hover at a low height for a moment to stabilize
+        for _ in range(10):
+            self._cf.commander.send_hover_setpoint(0, 0, 0, 0.1)
+            time.sleep(0.1)
+
+        # Ramp up to the target flight height
+        for i in range(10):
+            height = 0.1 + (self.FLIGHT_HEIGHT - 0.1) * (i + 1) / 10
+            self._cf.commander.send_hover_setpoint(0, 0, 0, height)
+            time.sleep(0.1)
 
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for sinusoidal control."""
         try:
             self._cf.platform.send_arming_request(True)
-            self._mc = MotionCommander(self._cf)
-            self._mc.take_off(height=self.FLIGHT_HEIGHT, velocity=0.3)
-
-            # Crucial: Stop the MotionCommander's internal thread so we can stream manual setpoints
-            thread = getattr(self._mc, "_thread", None)
-            if thread is not None:
-                try:
-                    thread.stop()
-                except Exception:
-                    self._log.warning("Failed to stop MotionCommander thread", exc_info=True)
-
+            self._manual_takeoff()
             self._active = True
             self._log.info("SinusoidalBehavior started")
         except Exception:
             self._log.exception("SinusoidalBehavior failed to start")
-            self._mc = None
             self._active = False
 
     def _safe_landing(self) -> None:
         """Execute the safe landing sequence: Stabilize -> Ramp -> Stop -> Disarm."""
-        if not self._mc:
+        if not self._active:
             return
 
         self._log.info("Executing safe landing sequence")
@@ -1057,10 +1058,9 @@ class SinusoidalBehavior(Behavior):
                 self._log.warning("Failed to disarm", exc_info=True)
 
             self._active = False
-            self._mc = None
 
     def step(self, sample: SensorSample) -> None:
-        if not self._active or not self._mc:
+        if not self._active:
             return
 
         # Data
@@ -1116,7 +1116,7 @@ class SinusoidalBehavior(Behavior):
 
     def on_stop(self) -> None:
         """Stop hook: Execute safe landing if not already done."""
-        if self._mc:
+        if self._active:
             self._safe_landing()
         try:
             # Stabilize
@@ -1152,7 +1152,6 @@ class SinusoidalBehavior(Behavior):
                 self._log.warning("Failed to disarm", exc_info=True)
 
             self._active = False
-            self._mc = None
 
 
 def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
