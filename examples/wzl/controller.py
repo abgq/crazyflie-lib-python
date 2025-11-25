@@ -97,62 +97,56 @@ class CrazyflieController:
         period_s = CONTROL_PERIOD_MS / 1000.0
         LOGGER.info("Controller loop started in '%s' mode", self._mode)
 
+        next_control_time = time.time() + period_s
+
         try:
             while not self._stop_event.is_set():
-                loop_start = time.time()
+                now = time.time()
+                timeout = next_control_time - now
                 
-                # Fetch the latest sample (processing all intermediate ones in the filter)
-                latest_filtered = self._drain_latest_sample()
+                try:
+                    # Block until a sample arrives or timeout expires
+                    raw_sample = self._queue.get(timeout=max(0, timeout))
 
-                if latest_filtered is not None:
-                    self._last_sample = latest_filtered
+                    # IMMEDIATELY update the filter for all variables in the sample
+                    if self._filter.is_enabled():
+                        filtered_values = dict(raw_sample.values)
+                        for name, value in raw_sample.values.items():
+                            if isinstance(value, numbers.Real):
+                                try:
+                                    filtered_values[name] = self._filter.update(name, float(value))
+                                except ValueError:
+                                    # FilterBank raises ValueError for unknown variables.
+                                    filtered_values[name] = self._filter.update(name, float(value))
+                        self._last_sample = SensorSample(timestamp=raw_sample.timestamp, values=filtered_values)
+                    else:
+                        self._last_sample = raw_sample
 
-                # Use _last_sample directly (it is already filtered)
-                if self._last_sample is not None:
-                    if self._check_safety(self._last_sample):
-                        break
-                    self._step(self._last_sample)
+                    # Loop back immediately to process next sample
+                    continue
 
-                elapsed = time.time() - loop_start
-                sleep_time = max(0.0, period_s - elapsed)
-                if sleep_time:
-                    self._stop_event.wait(timeout=sleep_time)
+                except Empty:
+                    # Timeout expired, proceed to control step
+                    pass
+
+                # Control Step
+                if time.time() >= next_control_time:
+                    if self._last_sample is not None:
+                        if self._check_safety(self._last_sample):
+                            break
+                        self._step(self._last_sample)
+
+                    next_control_time += period_s
+
+                    # Handle scheduling drift
+                    if next_control_time < time.time():
+                        next_control_time = time.time() + period_s
+
         except Exception:  # noqa: BLE001
             LOGGER.exception("Controller loop crashed; requesting stop")
             self._stop_event.set()
         finally:
             LOGGER.info("Controller loop stopped")
-
-    def _drain_latest_sample(self) -> Optional[SensorSample]:
-        """
-        Drain the queue, apply filters to ALL samples to update state,
-        and return the most recent filtered sample.
-        """
-        latest_filtered: Optional[SensorSample] = None
-        while True:
-            try:
-                raw_sample = self._queue.get_nowait()
-                # Apply filter immediately to every sample to keep history correct
-                latest_filtered = self._apply_filters(raw_sample)
-            except Empty:
-                break
-        return latest_filtered
-
-    def _apply_filters(self, sample: SensorSample) -> SensorSample:
-        """Apply per-variable moving averages when enabled."""
-        if not self._filter.is_enabled():
-            return sample
-
-        filtered_values = dict(sample.values)
-        for name, value in sample.values.items():
-            if isinstance(value, numbers.Real):
-                try:
-                    filtered_values[name] = self._filter.update(name, float(value))
-                except ValueError:
-                    # FilterBank raises ValueError for unknown variables.
-                    filtered_values[name] = self._filter.update(name, float(value))
-
-        return SensorSample(timestamp=sample.timestamp, values=filtered_values)
 
     def _check_safety(self, sample: SensorSample) -> bool:
         """Return True if safety triggered and controller should stop."""
