@@ -16,12 +16,7 @@ from constants import (
     SPEED_OF_LIGHT,
     DW1K_ANTENNA_DELAY_RC,
     DW1K_RC_TO_SECONDS,
-    DW1K_TOF_SCALING,
-    SEARCH_VELOCITY_MPS,
-    TUMBLE_RATE_RAD_S,
-    GRADIENT_THRESHOLD_COUNTER,
-    TARGET_COUNTER,
-    SLOW_SEARCH_VELOCITY_MPS,
+    DW1K_TOF_SCALING
 )
 
 from cflib.crazyflie import Crazyflie
@@ -767,10 +762,17 @@ class ProbeBehavior(Behavior):
 
 class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
+    
+    # --- Control Parameters for Run & Tumble ---
+    SEARCH_VELOCITY_MPS: float = 0.4    # Forward speed when running
+    TUMBLE_RATE_RAD_S: float = 30      # Yaw rate when tumbling (searching)
+    GRADIENT_THRESHOLD_COUNTER: float = 5  # Sensitivity to distance change (counters)
+    TARGET_COUNTER: float = 66200        # Distance to stop from anchor (counters)
+    SLOW_SEARCH_VELOCITY_MPS: float = 0.2 # Default search velocity if no previous action   
 
     FLIGHT_HEIGHT = 0.5
     LANDING_HEIGHT = 0.05
-    LANDING_STEPS = 20
+    LANDING_STEPS = 25
     LANDING_SLEEP = 0.1
     STABILIZE_STEPS = 5  # 0.5 seconds at 0.1s sleep
 
@@ -779,6 +781,7 @@ class RunAndTumbleBehavior(Behavior):
         self._mc: MotionCommander | None = None
         self._active: bool = False
         self._prev_counter: float | None = None
+        self._last_log: float = 0.0
 
         # State tracking for hysteresis
         self._last_vx: float = 0.0
@@ -814,12 +817,29 @@ class RunAndTumbleBehavior(Behavior):
         if not self._active or not self._mc:
             return
 
-        raw_counter = sample.values.get("dw1k.rangingCounter")
+        counter = sample.values.get("dw1k.rangingCounter")
+        vbattery = sample.values.get("pm.vbat")
 
-        if not isinstance(raw_counter, (int, float)):
+        if not isinstance(raw_counter, (int, float))
+        if not isinstance(counter, (int, float)):
             return  # Wait for valid data
 
-        counter = float(raw_counter)
+        # Log counter at 1.0 Hz
+        now = time.monotonic()
+        if now - self._last_log >= 5.0:
+            self._last_log = now
+            if isinstance(counter, (int, float)) and isinstance(vbattery, (int, float)):
+                self._log.info(
+                    "UWB counter: %d - Battery: %.2f V",
+                    int(counter),
+                    float(vbattery),
+                )
+            else:
+                self._log.info(
+                    "Missing/invalid data - counter=%r, vbat=%r",
+                    counter,
+                    vbattery,
+                )
 
         # Arrival Check (Counter decreases as we get closer)
         # Note: TARGET_COUNTER is -1 by default. User requested -1 values.
@@ -827,6 +847,44 @@ class RunAndTumbleBehavior(Behavior):
         # unless counter becomes -1 or lower (unlikely for UWB).
         if counter <= TARGET_COUNTER:
             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+        if counter <= self.TARGET_COUNTER:
+            self._log.info("Target counter %.1f reached; initiating landing sequence", counter)
+            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            try:
+                # Stabilize
+                for _ in range(self.STABILIZE_STEPS):
+                    self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                    time.sleep(self.LANDING_SLEEP)
+
+                # Land: Ramp down height
+                start_h = self.FLIGHT_HEIGHT
+                end_h = self.LANDING_HEIGHT
+                steps = self.LANDING_STEPS
+
+                for i in range(steps):
+                    # Calculate target height (linear ramp)
+                    ratio = (i + 1) / steps
+                    current_height = start_h - (start_h - end_h) * ratio
+                    self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
+                    time.sleep(self.LANDING_SLEEP)
+
+            except Exception:
+                self._log.exception("Error during manual landing sequence")
+            finally:
+                # Cut Power
+                try:
+                    self._cf.commander.send_stop_setpoint()
+                except Exception:
+                        self._log.warning("Failed to send stop setpoint", exc_info=True)
+
+                # Disarm
+                try:
+                    self._cf.platform.send_arming_request(False)
+                except Exception:
+                    self._log.warning("Failed to disarm", exc_info=True)
+
+                self._active = False
+                self._mc = None
             return
 
         # Initialize previous counter if needed
@@ -848,19 +906,26 @@ class RunAndTumbleBehavior(Behavior):
         # This effectively means ALMOST ALWAYS RUN if improving at all (or even degrading slightly).
         # However, I must follow the structure requested.
 
-        threshold = GRADIENT_THRESHOLD_COUNTER
+        threshold = self.GRADIENT_THRESHOLD_COUNTER
 
         vx = self._last_vx
         yaw_rate = self._last_yaw_rate
 
+        log_now = time.monotonic()
+        if log_now - self._last_log >= 1.0:
+            self._last_log = log_now
+            self._log.info("delta_r=%.2f, threshold=%.2f", delta_r, threshold)
+
         if delta_r < -threshold:
             # Getting closer (Run)
-            vx = SEARCH_VELOCITY_MPS
+            self._log.info("Run: delta_r=%.2f < -%.2f", delta_r, threshold)
+            vx = self.SEARCH_VELOCITY_MPS
             yaw_rate = 0.0
         elif delta_r > threshold:
             # Getting further (Tumble)
-            vx = SEARCH_VELOCITY_MPS * 0.5
-            yaw_rate = TUMBLE_RATE_RAD_S
+            self._log.info("Tumble: delta_r=%.2f > %.2f", delta_r, threshold)
+            vx = self.SEARCH_VELOCITY_MPS * 0.5
+            yaw_rate = self.TUMBLE_RATE_RAD_S
         else:
             # Noise/Deadband: Maintain previous
             # Check if we have a previous action, if not default (handled by initialization)
@@ -1059,6 +1124,41 @@ class SinusoidalBehavior(Behavior):
         """Stop hook: Execute safe landing if not already done."""
         if self._mc:
             self._safe_landing()
+        try:
+            # Stabilize
+            for _ in range(self.STABILIZE_STEPS):
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                time.sleep(self.LANDING_SLEEP)
+
+            # Land: Ramp down height
+            start_h = self.FLIGHT_HEIGHT
+            end_h = self.LANDING_HEIGHT
+            steps = self.LANDING_STEPS
+
+            for i in range(steps):
+                # Calculate target height (linear ramp)
+                ratio = (i + 1) / steps
+                current_height = start_h - (start_h - end_h) * ratio
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
+                time.sleep(self.LANDING_SLEEP)
+
+        except Exception:
+            self._log.exception("Error during manual landing sequence")
+        finally:
+            # Cut Power
+            try:
+                self._cf.commander.send_stop_setpoint()
+            except Exception:
+                self._log.warning("Failed to send stop setpoint", exc_info=True)
+
+            # Disarm
+            try:
+                self._cf.platform.send_arming_request(False)
+            except Exception:
+                self._log.warning("Failed to disarm", exc_info=True)
+
+            self._active = False
+            self._mc = None
 
 
 def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:

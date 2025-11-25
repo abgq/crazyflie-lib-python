@@ -30,7 +30,8 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
             {
                 "name": "dw1k.rangingCounter",
                 "filter": {
-                    "type": "EMA",
+                    "type": "SMA",
+                    "window": 10,
                     "alpha": 0.25
                 }
             },
@@ -39,7 +40,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 
-CONTROL_PERIOD_MS: int = 100
+CONTROL_PERIOD_MS: int = 500
 """Controller loop period in milliseconds."""
 
 VBAT_MIN: float = 3.3
@@ -48,18 +49,11 @@ VBAT_MIN: float = 3.3
 QUEUE_MAX_SIZE: int = 100
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
-CONTROLLER_MODE: str = "sinusoidal"
+CONTROLLER_MODE: str = "run_tumble"
 """
 Default controller mode. Options: 'idle', 'wzl', 'probe', 'demo_motion',
 'demo_highlevel', and 'sinusoidal'. Default is 'sinusoidal'.
 """
-
-# --- Control Parameters for Run & Tumble ---
-SEARCH_VELOCITY_MPS: float = 0.3    # Forward speed when running
-TUMBLE_RATE_RAD_S: float = 1.0      # Yaw rate when tumbling (searching)
-GRADIENT_THRESHOLD_COUNTER: float = -1.0  # Sensitivity to distance change (counters)
-TARGET_COUNTER: float = -1.0        # Distance to stop from anchor (counters)
-SLOW_SEARCH_VELOCITY_MPS: float = 0.3 # Default search velocity if no previous action
 
 # --- DW1000 / UWB calibration constants ---
 
@@ -86,11 +80,6 @@ __all__ = [
     "VBAT_MIN",
     "QUEUE_MAX_SIZE",
     "CONTROLLER_MODE",
-    "SEARCH_VELOCITY_MPS",
-    "TUMBLE_RATE_RAD_S",
-    "GRADIENT_THRESHOLD_COUNTER",
-    "TARGET_COUNTER",
-    "SLOW_SEARCH_VELOCITY_MPS",
     "SPEED_OF_LIGHT",
     "DW1K_ANTENNA_DELAY_RC",
     "DW1K_RC_TO_SECONDS",
