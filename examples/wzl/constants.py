@@ -24,6 +24,15 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "name": "position",
+        "period_ms": 50,  # 20 Hz logging
+        "variables": [
+            {
+                "name": "kalman.stateZ",
+            },
+        ],
+    },
+    {
         "name": "UWB",
         "period_ms": 20,  # 50 Hz logging
         "variables": [
