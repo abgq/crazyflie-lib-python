@@ -36,6 +36,15 @@ class ProbePhase(Enum):
     BACK = auto()
 
 
+class BehaviorState(Enum):
+    IDLE = auto()
+    TAKEOFF = auto()
+    ACTIVE = auto()
+    LANDING_STABILIZE = auto()
+    LANDING_DESCEND = auto()
+    FINISHED = auto()
+
+
 def ranging_counter_to_distance(counter: int) -> float:
     """Convert DW1K ranging counter units to distance in meters.
 
@@ -65,9 +74,19 @@ def ranging_counter_to_distance(counter: int) -> float:
 class Behavior(ABC):
     """Base class for Crazyflie control behaviors."""
 
+    # Default Constants
+    FLIGHT_HEIGHT = 0.5
+    LANDING_HEIGHT = 0.05
+    TAKEOFF_HEIGHT = 0.5
+    TAKEOFF_DURATION_S = 2.0 # Total time to ramp up
+    STABILIZE_DURATION_S = 0.5
+    LANDING_DURATION_S = 2.5 # Time to ramp down
+
     def __init__(self, cf: "Crazyflie") -> None:
         self._cf = cf
         self._log = logging.getLogger(self.__class__.__name__)
+        self._state = BehaviorState.IDLE
+        self._state_start_time = 0.0
 
     @abstractmethod
     def on_start(self) -> None:
@@ -80,6 +99,115 @@ class Behavior(ABC):
     @abstractmethod
     def on_stop(self) -> None:
         """Hook executed once when the controller stops."""
+
+    def _blocking_takeoff(self, target_height: float) -> None:
+        """Perform a blocking takeoff sequence using manual setpoints."""
+        self._state = BehaviorState.TAKEOFF
+        self._log.info("Starting blocking takeoff to %.2f m", target_height)
+
+        # 1. Arm
+        self._cf.platform.send_arming_request(True)
+
+        # 2. Hover at low height to stabilize
+        for _ in range(10):
+            self._cf.commander.send_hover_setpoint(0, 0, 0, 0.1)
+            time.sleep(0.1)
+
+        # 3. Ramp up
+        steps = 20 # 2 seconds total if 0.1s sleep
+        for i in range(steps):
+            h = 0.1 + (target_height - 0.1) * (i + 1) / steps
+            self._cf.commander.send_hover_setpoint(0, 0, 0, h)
+            time.sleep(0.1)
+
+        self._state = BehaviorState.ACTIVE
+        self._log.info("Takeoff complete. State: ACTIVE")
+
+    def _start_landing(self) -> None:
+        """Initiate non-blocking landing sequence."""
+        if self._state not in [BehaviorState.ACTIVE, BehaviorState.TAKEOFF]:
+            return
+
+        self._state = BehaviorState.LANDING_STABILIZE
+        self._state_start_time = time.monotonic()
+        self._log.info("Initiating landing sequence (STABILIZE)")
+
+    def _tick_landing_sequence(self, now: float) -> bool:
+        """
+        Advance the landing state machine.
+        Returns True if the behavior should return early (landing in progress or finished).
+        Returns False if the behavior is ACTIVE and should run its main logic.
+        """
+        if self._state == BehaviorState.ACTIVE or self._state == BehaviorState.TAKEOFF or self._state == BehaviorState.IDLE:
+            return False
+
+        if self._state == BehaviorState.FINISHED:
+            # Redundant safety
+            self._cf.commander.send_stop_setpoint()
+            return True
+
+        elapsed = now - self._state_start_time
+
+        if self._state == BehaviorState.LANDING_STABILIZE:
+            if elapsed >= self.STABILIZE_DURATION_S:
+                self._state = BehaviorState.LANDING_DESCEND
+                self._state_start_time = now
+                self._log.info("Landing: Descending")
+            else:
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            return True
+
+        if self._state == BehaviorState.LANDING_DESCEND:
+            if elapsed >= self.LANDING_DURATION_S:
+                self._state = BehaviorState.FINISHED
+                self._log.info("Landing complete. State: FINISHED")
+                self._cf.commander.send_stop_setpoint()
+                self._cf.platform.send_arming_request(False)
+            else:
+                # Interpolate
+                progress = elapsed / self.LANDING_DURATION_S
+                current_height = self.FLIGHT_HEIGHT - (self.FLIGHT_HEIGHT - self.LANDING_HEIGHT) * progress
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
+            return True
+
+        return False
+
+    def _blocking_safe_landing(self) -> None:
+        """Perform a blocking safe landing (for use in on_stop)."""
+        if self._state in [BehaviorState.IDLE, BehaviorState.FINISHED]:
+            return
+
+        self._log.info("Executing blocking safe landing...")
+        try:
+            # Stabilize
+            steps = int(self.STABILIZE_DURATION_S / 0.1)
+            for _ in range(max(1, steps)):
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                time.sleep(0.1)
+
+            # Descent
+            steps = int(self.LANDING_DURATION_S / 0.1)
+            start_h = self.FLIGHT_HEIGHT
+            end_h = self.LANDING_HEIGHT
+            for i in range(steps):
+                ratio = (i + 1) / steps
+                current_height = start_h - (start_h - end_h) * ratio
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
+                time.sleep(0.1)
+
+        except Exception:
+            self._log.exception("Error during blocking safe landing")
+        finally:
+            self._log.info("Cutting power and disarming")
+            try:
+                self._cf.commander.send_stop_setpoint()
+            except Exception:
+                pass
+            try:
+                self._cf.platform.send_arming_request(False)
+            except Exception:
+                pass
+            self._state = BehaviorState.FINISHED
 
 
 class IdleBehavior(Behavior):
@@ -769,16 +897,12 @@ class RunAndTumbleBehavior(Behavior):
     GRADIENT_THRESHOLD_COUNTER: float = 5  # Sensitivity to distance change (counters)
     TARGET_COUNTER: float = 65500        # Distance to stop from anchor (counters) 
 
-    FLIGHT_HEIGHT = 0.5
-    LANDING_HEIGHT = 0.05
-    LANDING_STEPS = 25
-    LANDING_SLEEP = 0.1
-    STABILIZE_STEPS = 5  # 0.5 seconds at 0.1s sleep
+    # Inherit defaults from Behavior but override if necessary
+    # FLIGHT_HEIGHT = 0.5 (Default)
+    # LANDING_HEIGHT = 0.05 (Default)
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
-        self._mc: MotionCommander | None = None
-        self._active: bool = False
         self._prev_counter: float | None = None
         self._last_log: float = 0.0
 
@@ -789,31 +913,15 @@ class RunAndTumbleBehavior(Behavior):
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for reactive control."""
         try:
-            self._cf.platform.send_arming_request(True)
-
-            # Create MotionCommander and takeoff
-            self._mc = MotionCommander(self._cf)
-            self._mc.take_off(height=self.FLIGHT_HEIGHT, velocity=0.3)
-            time.sleep(1.0)  # Wait for takeoff to stabilize
-
-            # Stop the internal MotionCommander thread to avoid conflict with our loop
-            thread = getattr(self._mc, "_thread", None)
-            if thread is not None:
-                try:
-                    thread.stop()
-                except Exception:
-                    self._log.warning("Failed to stop MotionCommander thread", exc_info=True)
-
-            self._active = True
+            self._blocking_takeoff(self.FLIGHT_HEIGHT)
             self._log.info("RunAndTumbleBehavior started")
 
         except Exception:
             self._log.exception("RunAndTumbleBehavior failed to start")
-            self._mc = None
-            self._active = False
 
     def step(self, sample: SensorSample) -> None:
-        if not self._active or not self._mc:
+        # Tick the state machine (handles landing sequences)
+        if self._tick_landing_sequence(time.monotonic()):
             return
 
         counter = sample.values.get("dw1k.rangingCounter")
@@ -841,49 +949,9 @@ class RunAndTumbleBehavior(Behavior):
                 )
 
         # Arrival Check (Counter decreases as we get closer)
-        # Note: TARGET_COUNTER is -1 by default. User requested -1 values.
-        # This check might need tuning. If TARGET_COUNTER is -1, this is effectively disabled
-        # unless counter becomes -1 or lower (unlikely for UWB).
-        if counter <= self.TARGET_COUNTER:
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
         if counter <= self.TARGET_COUNTER:
             self._log.info("Target counter %.1f reached; initiating landing sequence", counter)
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-            try:
-                # Stabilize
-                for _ in range(self.STABILIZE_STEPS):
-                    self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-                    time.sleep(self.LANDING_SLEEP)
-
-                # Land: Ramp down height
-                start_h = self.FLIGHT_HEIGHT
-                end_h = self.LANDING_HEIGHT
-                steps = self.LANDING_STEPS
-
-                for i in range(steps):
-                    # Calculate target height (linear ramp)
-                    ratio = (i + 1) / steps
-                    current_height = start_h - (start_h - end_h) * ratio
-                    self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-                    time.sleep(self.LANDING_SLEEP)
-
-            except Exception:
-                self._log.exception("Error during manual landing sequence")
-            finally:
-                # Cut Power
-                try:
-                    self._cf.commander.send_stop_setpoint()
-                except Exception:
-                        self._log.warning("Failed to send stop setpoint", exc_info=True)
-
-                # Disarm
-                try:
-                    self._cf.platform.send_arming_request(False)
-                except Exception:
-                    self._log.warning("Failed to disarm", exc_info=True)
-
-                self._active = False
-                self._mc = None
+            self._start_landing()
             return
 
         # Initialize previous counter if needed
@@ -898,13 +966,6 @@ class RunAndTumbleBehavior(Behavior):
         delta_r = counter - self._prev_counter
         self._prev_counter = counter
 
-        # Reactive Logic
-        # Getting closer: delta_r is negative.
-        # delta_r < -THRESHOLD means we are improving fast enough.
-        # THRESHOLD is -1.0. -(-1.0) = 1.0. So if delta_r < 1.0.
-        # This effectively means ALMOST ALWAYS RUN if improving at all (or even degrading slightly).
-        # However, I must follow the structure requested.
-
         threshold = self.GRADIENT_THRESHOLD_COUNTER
 
         vx = self._last_vx
@@ -912,17 +973,16 @@ class RunAndTumbleBehavior(Behavior):
 
         if delta_r < -threshold:
             # Getting closer (Run)
-            self._log.info("Run: delta_r=%.2f < -%.2f", delta_r, threshold)
+            # self._log.info("Run: delta_r=%.2f < -%.2f", delta_r, threshold)
             vx = self.SEARCH_VELOCITY_MPS
             yaw_rate = 0.0
         elif delta_r > threshold:
             # Getting further (Tumble)
-            self._log.info("Tumble: delta_r=%.2f > %.2f", delta_r, threshold)
+            # self._log.info("Tumble: delta_r=%.2f > %.2f", delta_r, threshold)
             vx = self.SEARCH_VELOCITY_MPS * 0.5
             yaw_rate = self.TUMBLE_RATE_DEG_S
         else:
             # Noise/Deadband: Maintain previous
-            # Check if we have a previous action, if not default (handled by initialization)
             pass
 
         self._last_vx = vx
@@ -933,44 +993,7 @@ class RunAndTumbleBehavior(Behavior):
 
     def on_stop(self) -> None:
         """Stop, land, and disarm safely."""
-        if not self._mc:
-            return
-
-        try:
-            # Stabilize
-            for _ in range(self.STABILIZE_STEPS):
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-                time.sleep(self.LANDING_SLEEP)
-
-            # Land: Ramp down height
-            start_h = self.FLIGHT_HEIGHT
-            end_h = self.LANDING_HEIGHT
-            steps = self.LANDING_STEPS
-
-            for i in range(steps):
-                # Calculate target height (linear ramp)
-                ratio = (i + 1) / steps
-                current_height = start_h - (start_h - end_h) * ratio
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-                time.sleep(self.LANDING_SLEEP)
-
-        except Exception:
-            self._log.exception("Error during manual landing sequence")
-        finally:
-            # Cut Power
-            try:
-                self._cf.commander.send_stop_setpoint()
-            except Exception:
-                self._log.warning("Failed to send stop setpoint", exc_info=True)
-
-            # Disarm
-            try:
-                self._cf.platform.send_arming_request(False)
-            except Exception:
-                self._log.warning("Failed to disarm", exc_info=True)
-
-            self._active = False
-            self._mc = None
+        self._blocking_safe_landing()
 
 
 class SinusoidalBehavior(Behavior):
@@ -984,83 +1007,21 @@ class SinusoidalBehavior(Behavior):
     BIAS_LIMIT = 1.0            # Max yaw bias (rad/s) to prevent spinning
     TARGET_DIST_M = 0.5         # Stop distance
 
-    # Landing/Safety Constants
-    FLIGHT_HEIGHT = 0.5
-    LANDING_HEIGHT = 0.05
-    LANDING_STEPS = 25
-    LANDING_SLEEP = 0.1
-    STABILIZE_STEPS = 5
-
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
         self._bias = 0.0
         self._prev_dist: float | None = None
-        self._active = False
-
-    def _manual_takeoff(self) -> None:
-        """Take off to a given height using manual setpoints."""
-        # Hover at a low height for a moment to stabilize
-        for _ in range(10):
-            self._cf.commander.send_hover_setpoint(0, 0, 0, 0.1)
-            time.sleep(0.1)
-
-        # Ramp up to the target flight height
-        for i in range(10):
-            height = 0.1 + (self.FLIGHT_HEIGHT - 0.1) * (i + 1) / 10
-            self._cf.commander.send_hover_setpoint(0, 0, 0, height)
-            time.sleep(0.1)
 
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for sinusoidal control."""
         try:
-            self._cf.platform.send_arming_request(True)
-            self._manual_takeoff()
-            self._active = True
+            self._blocking_takeoff(self.FLIGHT_HEIGHT)
             self._log.info("SinusoidalBehavior started")
         except Exception:
             self._log.exception("SinusoidalBehavior failed to start")
-            self._active = False
-
-    def _safe_landing(self) -> None:
-        """Execute the safe landing sequence: Stabilize -> Ramp -> Stop -> Disarm."""
-        if not self._active:
-            return
-
-        self._log.info("Executing safe landing sequence")
-        try:
-            # 1. Stabilize
-            for _ in range(self.STABILIZE_STEPS):
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-                time.sleep(self.LANDING_SLEEP)
-
-            # 2. Ramp down height
-            start_h = self.FLIGHT_HEIGHT
-            end_h = self.LANDING_HEIGHT
-            steps = self.LANDING_STEPS
-            for i in range(steps):
-                ratio = (i + 1) / steps
-                current_height = start_h - (start_h - end_h) * ratio
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-                time.sleep(self.LANDING_SLEEP)
-        except Exception:
-            self._log.exception("Error during landing sequence")
-        finally:
-            # 3. Cut Power
-            try:
-                self._cf.commander.send_stop_setpoint()
-            except Exception:
-                self._log.warning("Failed to send stop setpoint", exc_info=True)
-
-            # 4. Disarm
-            try:
-                self._cf.platform.send_arming_request(False)
-            except Exception:
-                self._log.warning("Failed to disarm", exc_info=True)
-
-            self._active = False
 
     def step(self, sample: SensorSample) -> None:
-        if not self._active:
+        if self._tick_landing_sequence(time.monotonic()):
             return
 
         # Data
@@ -1077,7 +1038,7 @@ class SinusoidalBehavior(Behavior):
         # Arrival Check
         if dist < self.TARGET_DIST_M:
             self._log.info("Target reached (%.2fm < %.2fm). Landing.", dist, self.TARGET_DIST_M)
-            self._safe_landing()
+            self._start_landing()
             return
 
         # Algorithm (Extremum Seeking)
@@ -1116,42 +1077,7 @@ class SinusoidalBehavior(Behavior):
 
     def on_stop(self) -> None:
         """Stop hook: Execute safe landing if not already done."""
-        if self._active:
-            self._safe_landing()
-        try:
-            # Stabilize
-            for _ in range(self.STABILIZE_STEPS):
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-                time.sleep(self.LANDING_SLEEP)
-
-            # Land: Ramp down height
-            start_h = self.FLIGHT_HEIGHT
-            end_h = self.LANDING_HEIGHT
-            steps = self.LANDING_STEPS
-
-            for i in range(steps):
-                # Calculate target height (linear ramp)
-                ratio = (i + 1) / steps
-                current_height = start_h - (start_h - end_h) * ratio
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-                time.sleep(self.LANDING_SLEEP)
-
-        except Exception:
-            self._log.exception("Error during manual landing sequence")
-        finally:
-            # Cut Power
-            try:
-                self._cf.commander.send_stop_setpoint()
-            except Exception:
-                self._log.warning("Failed to send stop setpoint", exc_info=True)
-
-            # Disarm
-            try:
-                self._cf.platform.send_arming_request(False)
-            except Exception:
-                self._log.warning("Failed to disarm", exc_info=True)
-
-            self._active = False
+        self._blocking_safe_landing()
 
 
 def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
