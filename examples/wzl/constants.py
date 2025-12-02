@@ -37,6 +37,15 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
             },
         ],
     },
+    {
+        "name": "state",
+        "period_ms": 100,  # 10 Hz logging
+        "variables": [
+            {
+                "name": "kalman.stateZ",
+            },
+        ],
+    },
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 
@@ -46,7 +55,7 @@ CONTROL_PERIOD_MS: int = 100
 VBAT_MIN: float = 3.3
 """Minimum safe battery voltage, in volts."""
 
-QUEUE_MAX_SIZE: int = 100
+QUEUE_MAX_SIZE: int = 1
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
 CONTROLLER_MODE: str = "idle"

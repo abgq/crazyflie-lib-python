@@ -8,11 +8,12 @@ import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import numbers
 
 from cflib.crazyflie.log import LogConfig
 
 from constants import LOG_CONFIGS
-
+from filters import FilterBank
 
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class CrazyflieLogger:
         self._latest_values: Dict[str, Any] = {}
         self._logconfs: List[LogConfig] = []
         self._running = False
+        self._filter = FilterBank(self._log_configs)
 
     def start(self) -> None:
         """Create log configurations and start streaming data."""
@@ -104,6 +106,15 @@ class CrazyflieLogger:
         """Handle new log data coming from cflib."""
         if not self._running:
             return
+
+        # Apply filtering immediately
+        if self._filter.is_enabled():
+            for name, value in data.items():
+                if isinstance(value, numbers.Real):
+                    try:
+                        data[name] = self._filter.update(name, float(value))
+                    except ValueError:
+                        pass  # Variable not in filter bank, leave as-is
 
         now = time.time()
         with self._lock:

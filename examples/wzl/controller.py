@@ -16,7 +16,6 @@ from constants import (
     LOG_CONFIGS,
     VBAT_MIN,
 )
-from filters import FilterBank
 from logger import SensorSample
 
 LOGGER = logging.getLogger(__name__)
@@ -49,9 +48,6 @@ class CrazyflieController:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # New FilterBank initialization
-        self._filter = FilterBank(self._log_configs)
-
         self._last_sample: Optional[SensorSample] = None
         self._behavior: Behavior = get_behavior(mode, cf)
         self._behavior_stopped = False
@@ -67,7 +63,8 @@ class CrazyflieController:
         try:
             self._behavior.on_start()
         except Exception:  # noqa: BLE001
-            LOGGER.exception("behavior.on_start() raised an exception")
+            LOGGER.exception("behavior.on_start() raised an exception; aborting start")
+            return
 
         self._thread = threading.Thread(target=self._run_loop, name="cf-controller", daemon=True)
         self._thread.start()
@@ -106,21 +103,7 @@ class CrazyflieController:
                 
                 try:
                     # Block until a sample arrives or timeout expires
-                    raw_sample = self._queue.get(timeout=max(0, timeout))
-
-                    # IMMEDIATELY update the filter for all variables in the sample
-                    if self._filter.is_enabled():
-                        filtered_values = dict(raw_sample.values)
-                        for name, value in raw_sample.values.items():
-                            if isinstance(value, numbers.Real):
-                                try:
-                                    filtered_values[name] = self._filter.update(name, float(value))
-                                except ValueError:
-                                    # FilterBank raises ValueError for unknown variables.
-                                    filtered_values[name] = self._filter.update(name, float(value))
-                        self._last_sample = SensorSample(timestamp=raw_sample.timestamp, values=filtered_values)
-                    else:
-                        self._last_sample = raw_sample
+                    self._last_sample = self._queue.get(timeout=max(0, timeout))
 
                     # Loop back immediately to process next sample
                     continue
