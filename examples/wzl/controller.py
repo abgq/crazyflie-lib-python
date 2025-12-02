@@ -94,11 +94,11 @@ class CrazyflieController:
         period_s = CONTROL_PERIOD_MS / 1000.0
         LOGGER.info("Controller loop started in '%s' mode", self._mode)
 
-        next_control_time = time.time() + period_s
+        next_control_time = time.monotonic() + period_s
 
         try:
             while not self._stop_event.is_set():
-                now = time.time()
+                now = time.monotonic()
                 timeout = next_control_time - now
                 
                 try:
@@ -113,7 +113,7 @@ class CrazyflieController:
                     pass
 
                 # Control Step
-                if time.time() >= next_control_time:
+                if time.monotonic() >= next_control_time:
                     if self._last_sample is not None:
                         if self._check_safety(self._last_sample):
                             break
@@ -122,8 +122,8 @@ class CrazyflieController:
                     next_control_time += period_s
 
                     # Handle scheduling drift
-                    if next_control_time < time.time():
-                        next_control_time = time.time() + period_s
+                    if next_control_time < time.monotonic():
+                        next_control_time = time.monotonic() + period_s
 
         except Exception:  # noqa: BLE001
             LOGGER.exception("Controller loop crashed; requesting stop")

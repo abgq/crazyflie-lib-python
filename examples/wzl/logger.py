@@ -116,7 +116,7 @@ class CrazyflieLogger:
                     except ValueError:
                         pass  # Variable not in filter bank, leave as-is
 
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             self._latest_values.update(data)
             snapshot = dict(self._latest_values)
