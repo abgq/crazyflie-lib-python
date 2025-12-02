@@ -49,10 +49,9 @@ VBAT_MIN: float = 3.3
 QUEUE_MAX_SIZE: int = 100
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
-CONTROLLER_MODE: str = "run_tumble"
+CONTROLLER_MODE: str = "idle"
 """
-Default controller mode. Options: 'idle', 'wzl', 'probe', 'demo_motion',
-'demo_highlevel', and 'sinusoidal'. Default is 'sinusoidal'.
+Default controller mode. Options: 'idle', 'run_tumble', and 'sinusoidal'. Default is 'idle'.
 """
 
 # --- DW1000 / UWB calibration constants ---
