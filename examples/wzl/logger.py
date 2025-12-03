@@ -109,10 +109,17 @@ class CrazyflieLogger:
 
         # Apply filtering immediately
         if self._filter.is_enabled():
-            for name, value in data.items():
+            # We need to list items because we might delete keys during iteration
+            for name, value in list(data.items()):
                 if isinstance(value, numbers.Real):
                     try:
-                        data[name] = self._filter.update(name, float(value))
+                        filtered_val = self._filter.update(name, float(value))
+                        if filtered_val is not None:
+                            data[name] = filtered_val
+                        else:
+                            # Value rejected. Remove it from the dataset to prevent
+                            # the controller from acting on stale or raw data.
+                            del data[name]
                     except ValueError:
                         LOGGER.warning("Variable '%s' not found in filter bank, leaving as-is", name)
                         pass  # Variable not in filter bank, leave as-is

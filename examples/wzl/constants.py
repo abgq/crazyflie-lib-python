@@ -29,11 +29,16 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "dw1k.rangingCounter",
-                "filter": {
-                    "type": "SMA",
-                    "window": 5,
-                    "alpha": 0.25
-                }
+                "filter": [
+                    {
+                        "type": "StepLimit",
+                        "threshold": 500
+                    },
+                    {
+                        "type": "EMA",
+                        "alpha": 0.25
+                    }
+                ]
             },
         ],
     },

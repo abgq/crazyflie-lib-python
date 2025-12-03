@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -14,8 +14,8 @@ class SignalFilter(ABC):
     """Abstract base class for signal filters."""
 
     @abstractmethod
-    def update(self, value: float) -> float:
-        """Process a new sample and return the filtered value."""
+    def update(self, value: float) -> Optional[float]:
+        """Process a new sample and return the filtered value, or None to reject."""
 
 
 class NoFilter(SignalFilter):
@@ -23,6 +23,42 @@ class NoFilter(SignalFilter):
 
     def update(self, value: float) -> float:
         return value
+
+
+class StepLimitFilter(SignalFilter):
+    """Rejects values that jump more than ``threshold`` from the last valid value."""
+
+    def __init__(self, threshold: float) -> None:
+        self.threshold = float(threshold)
+        self.last_valid_value: Optional[float] = None
+
+    def update(self, value: float) -> Optional[float]:
+        if self.last_valid_value is None:
+            self.last_valid_value = value
+            return value
+
+        delta = abs(value - self.last_valid_value)
+        if delta > self.threshold:
+            return None
+
+        self.last_valid_value = value
+        return value
+
+
+class ChainFilter(SignalFilter):
+    """Runs a sequence of filters; stops and returns None if any filter returns None."""
+
+    def __init__(self, filters: List[SignalFilter]) -> None:
+        self.filters = list(filters)
+
+    def update(self, value: float) -> Optional[float]:
+        current_val = value
+        for f in self.filters:
+            out = f.update(current_val)
+            if out is None:
+                return None
+            current_val = out
+        return current_val
 
 
 class MovingAverageFilter(SignalFilter):
@@ -78,7 +114,7 @@ class FilterBank:
         """Return ``True`` if any variable requests filtering."""
         return self._enabled
 
-    def update(self, name: str, value: float) -> float:
+    def update(self, name: str, value: float) -> Optional[float]:
         """Return the filtered value for ``name``.
 
         Raises:
@@ -87,6 +123,41 @@ class FilterBank:
         if name not in self.filters:
             raise ValueError(f"Unknown variable '{name}' in FilterBank update")
         return self.filters[name].update(value)
+
+    def _create_single_filter(self, filter_cfg: Dict[str, Any], var_name: str) -> SignalFilter:
+        """Instantiate a single filter from a dictionary config."""
+        ftype = filter_cfg.get("type")
+
+        if ftype == "SMA":
+            window = filter_cfg.get("window", 0)
+            try:
+                w_int = int(window)
+                if w_int > 0:
+                    return MovingAverageFilter(w_int)
+            except (ValueError, TypeError):
+                LOGGER.warning("Invalid SMA window '%s' for '%s'", window, var_name)
+            return NoFilter()
+
+        elif ftype == "EMA":
+            alpha = filter_cfg.get("alpha", 1.0)
+            try:
+                a_float = float(alpha)
+                return ExponentialFilter(a_float)
+            except (ValueError, TypeError):
+                LOGGER.warning("Invalid EMA alpha '%s' for '%s'", alpha, var_name)
+            return NoFilter()
+
+        elif ftype == "StepLimit":
+            threshold = filter_cfg.get("threshold", 0.0)
+            try:
+                t_float = float(threshold)
+                return StepLimitFilter(t_float)
+            except (ValueError, TypeError):
+                LOGGER.warning("Invalid StepLimit threshold '%s' for '%s'", threshold, var_name)
+            return NoFilter()
+
+        # Type "None" or unknown
+        return NoFilter()
 
     def _create_filter_for_entry(self, entry: Any, log_name: str) -> tuple[Optional[str], SignalFilter]:
         """Parse a config entry and return (variable_name, FilterInstance)."""
@@ -98,36 +169,28 @@ class FilterBank:
             if not name:
                 LOGGER.warning("Variable entry without name in log config '%s'", log_name)
                 return None, NoFilter()
+            var_name = str(name)
 
             filter_cfg = entry.get("filter")
+            if not filter_cfg:
+                return var_name, NoFilter()
 
-            if not filter_cfg or not isinstance(filter_cfg, dict):
-                return str(name), NoFilter()
+            # Case A: List of filters -> ChainFilter
+            if isinstance(filter_cfg, list):
+                chain_list = []
+                for item in filter_cfg:
+                    if isinstance(item, dict):
+                        chain_list.append(self._create_single_filter(item, var_name))
+                if not chain_list:
+                    return var_name, NoFilter()
+                return var_name, ChainFilter(chain_list)
 
-            ftype = filter_cfg.get("type")
+            # Case B: Single dict
+            if isinstance(filter_cfg, dict):
+                return var_name, self._create_single_filter(filter_cfg, var_name)
 
-            if ftype == "SMA":
-                window = filter_cfg.get("window", 0)
-                try:
-                    w_int = int(window)
-                    if w_int > 0:
-                        return str(name), MovingAverageFilter(w_int)
-                except (ValueError, TypeError):
-                    LOGGER.warning("Invalid SMA window '%s' for '%s'", window, name)
-                # Fallback
-                return str(name), NoFilter()
-
-            elif ftype == "EMA":
-                alpha = filter_cfg.get("alpha", 1.0)
-                try:
-                    a_float = float(alpha)
-                    return str(name), ExponentialFilter(a_float)
-                except (ValueError, TypeError):
-                    LOGGER.warning("Invalid EMA alpha '%s' for '%s'", alpha, name)
-                return str(name), NoFilter()
-
-            # Type "None" or unknown
-            return str(name), NoFilter()
+            # Unknown type
+            return var_name, NoFilter()
 
         LOGGER.warning("Unsupported variable entry %r in log config '%s'", entry, log_name)
         return None, NoFilter()
