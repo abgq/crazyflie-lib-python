@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-CF_URI: str = "radio://0/80/2M/E7E7E7E7E6"
+CF_URI: str = "radio://0/80/2M/E7E7E7E7E7"
 """Default Crazyflie URI. Update this to match the actual link configuration."""
 
 LOG_CONFIGS: List[Dict[str, Any]] = [
@@ -32,11 +32,11 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
                 "filter": [
                     {
                         "type": "StepLimit",
-                        "threshold": 500
+                        "threshold": 1000
                     },
                     {
-                        "type": "EMA",
-                        "alpha": 0.25
+                        "type": "SMA",
+                        "window": 5
                     }
                 ]
             },
@@ -63,7 +63,7 @@ VBAT_MIN: float = 3.3
 QUEUE_MAX_SIZE: int = 1
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
-CONTROLLER_MODE: str = "sinusoidal"
+CONTROLLER_MODE: str = "run_tumble"
 """
 Default controller mode. Options: 'idle', 'run_tumble', and 'sinusoidal'. Default is 'idle'.
 """

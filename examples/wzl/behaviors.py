@@ -57,7 +57,7 @@ class Behavior(ABC):
     LANDING_HEIGHT = 0.05
     LANDING_STEPS = 20
     LANDING_SLEEP = 0.1
-    STABILIZE_STEPS = 5
+    STABILIZE_STEPS = 10
     FLIGHT_HEIGHT = 0.5  # Default flight height in meters
 
     def __init__(self, cf: "Crazyflie") -> None:
@@ -79,6 +79,8 @@ class Behavior(ABC):
 
     def take_off(self, target_height: float, duration: float = 2.0) -> None:
         """Execute a blocking takeoff sequence."""
+        self._cf.platform.send_arming_request(True)
+        time.sleep(1.5)  # Allow time for arming
         self._log.info("Taking off to %.2f m over %.1f s", target_height, duration)
         steps = int(duration / self.LANDING_SLEEP)
         for i in range(steps):
@@ -174,9 +176,9 @@ class RunAndTumbleBehavior(Behavior):
     
     # --- Control Parameters for Run & Tumble ---
     SEARCH_VELOCITY_MPS: float = 0.4    # Forward speed when running
-    TUMBLE_RATE_DEG_S: float = 75      # Yaw rate when tumbling (searching)
+    TUMBLE_RATE_DEG_S: float = 60      # Yaw rate when tumbling (searching)
     GRADIENT_THRESHOLD_COUNTER: float = 6  # Sensitivity to distance change (counters)
-    TARGET_COUNTER: float = 66100        # Distance to stop from anchor (counters) 
+    TARGET_COUNTER: float = 66250        # Distance to stop from anchor (counters) 
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -191,10 +193,7 @@ class RunAndTumbleBehavior(Behavior):
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for reactive control."""
         try:
-            self._cf.platform.send_arming_request(True)
-            time.sleep(1.0)  # Allow time for arming
             self.take_off(self.FLIGHT_HEIGHT)
-            time.sleep(1.0)  # Allow time for stabilization
             self._active = True
             self._log.info("RunAndTumbleBehavior started")
 
@@ -296,12 +295,12 @@ class SinusoidalBehavior(Behavior):
     """Gradient-seeking navigation using sinusoidal yaw modulation."""
 
     # Tuning Parameters
-    VELOCITY_MPS = 0.3              # Forward flight speed
-    DITHER_OMEGA = 4.0              # Frequency of sine wave (rad/s)
-    DITHER_AMP = 0.5                # Amplitude of sine wave
-    GAIN = 25.0                     # Learning rate for the bias (Gradient Gain)
-    BIAS_LIMIT = 1.0                # Max yaw bias (rad/s) to prevent spinning
-    TARGET_DIST_COUNTER = 66100     # Stop distance
+    VELOCITY_MPS = 0.40              # Forward flight speed
+    DITHER_OMEGA = 3.0              # Frequency of sine wave (rad/s)
+    DITHER_AMP = 0.8                # Amplitude of sine wave
+    GAIN = 20.0                     # Learning rate for the bias (Gradient Gain)
+    BIAS_LIMIT = 1.2                # Max yaw bias (rad/s) to prevent spinning
+    TARGET_DIST_COUNTER = 66250     # Stop distance
 
     # Landing/Safety Constants
     FLIGHT_HEIGHT = 0.5
@@ -311,12 +310,15 @@ class SinusoidalBehavior(Behavior):
         self._bias = 0.0
         self._prev_counter: int | None = None
         self._active = False
+        self._last_log: float = 0.0
 
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for sinusoidal control."""
         try:
             self._cf.platform.send_arming_request(True)
+            time.sleep(1.0)  # Allow time for arming
             self.take_off(self.FLIGHT_HEIGHT)
+            time.sleep(1.0)  # Allow time for stabilization
             self._active = True
             self._log.info("SinusoidalBehavior started")
         except Exception:
@@ -328,11 +330,12 @@ class SinusoidalBehavior(Behavior):
             return
         
         # Data
+        vbattery = sample.values.get("pm.vbat")
         counter = sample.values.get("dw1k.rangingCounter")
         alt = sample.values.get("kalman.stateZ")
 
-        if counter is None or alt is None:
-            self._log.warning("Missing rangingCounter or altitude in sample; ignoring")
+        if counter is None or alt is None or vbattery is None:
+            self._log.warning("Missing rangingCounter, altitude, or battery voltage in sample; ignoring")
             return
 
         if isinstance(alt, (int, float)):
@@ -340,6 +343,16 @@ class SinusoidalBehavior(Behavior):
         
         if isinstance(counter, (int, float)):
             counter = int(counter)
+
+        if isinstance(vbattery, (int, float)):
+            vbattery = float(vbattery)
+
+        # Logging
+        now = time.monotonic()
+
+        if now - self._last_log >= 1.0:
+            self._last_log = now
+            self._log.info("Altitude: %.2f, Ranging Counter: %d, Battery Voltage: %.2f", self._last_altitude, counter, vbattery)
 
         # Convert to meters
         # try:
