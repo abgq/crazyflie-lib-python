@@ -114,6 +114,7 @@ class CrazyflieLogger:
                     try:
                         data[name] = self._filter.update(name, float(value))
                     except ValueError:
+                        LOGGER.warning("Variable '%s' not found in filter bank, leaving as-is", name)
                         pass  # Variable not in filter bank, leave as-is
 
         now = time.monotonic()

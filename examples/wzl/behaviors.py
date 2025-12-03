@@ -46,14 +46,19 @@ def ranging_counter_to_distance(counter: int) -> float:
     
     return float(distance_m)
 
+def rad_to_deg(rad: float) -> float:
+    """Convert radians to degrees."""
+    return rad * (180.0 / math.pi)
+
 class Behavior(ABC):
     """Base class for Crazyflie control behaviors."""
 
     # Default landing settings
     LANDING_HEIGHT = 0.05
-    LANDING_STEPS = 25
+    LANDING_STEPS = 20
     LANDING_SLEEP = 0.1
     STABILIZE_STEPS = 5
+    FLIGHT_HEIGHT = 0.5  # Default flight height in meters
 
     def __init__(self, cf: "Crazyflie") -> None:
         self._cf = cf
@@ -91,8 +96,8 @@ class Behavior(ABC):
         """Execute a blocking landing sequence using the last known altitude."""
         start_h = self._last_altitude
         if start_h is None:
-            self._log.warning("Landing without known altitude; defaulting to 0.5m")
-            start_h = 0.5
+            self._log.warning("Landing without known altitude; defaulting to %f m", self.FLIGHT_HEIGHT)
+            start_h = self.FLIGHT_HEIGHT
 
         self._log.info("Landing from %.2f m", start_h)
 
@@ -125,7 +130,6 @@ class Behavior(ABC):
         except Exception:
             self._log.warning("Failed to disarm", exc_info=True)
 
-
 class IdleBehavior(Behavior):
     """Safe default behavior that performs no motion commands."""
 
@@ -143,9 +147,9 @@ class IdleBehavior(Behavior):
         """Log battery and UWB counter at a low rate without crashing on None."""
         raw = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
+        alt = sample.values.get("kalman.stateZ")
 
         # Update altitude even in Idle for consistency/debugging
-        alt = sample.values.get("kalman.stateZ")
         if isinstance(alt, (int, float)):
             self._last_altitude = float(alt)
 
@@ -171,10 +175,8 @@ class RunAndTumbleBehavior(Behavior):
     # --- Control Parameters for Run & Tumble ---
     SEARCH_VELOCITY_MPS: float = 0.4    # Forward speed when running
     TUMBLE_RATE_DEG_S: float = 75      # Yaw rate when tumbling (searching)
-    GRADIENT_THRESHOLD_COUNTER: float = 5  # Sensitivity to distance change (counters)
-    TARGET_COUNTER: float = 65500        # Distance to stop from anchor (counters) 
-
-    FLIGHT_HEIGHT = 0.5
+    GRADIENT_THRESHOLD_COUNTER: float = 6  # Sensitivity to distance change (counters)
+    TARGET_COUNTER: float = 66100        # Distance to stop from anchor (counters) 
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -190,7 +192,9 @@ class RunAndTumbleBehavior(Behavior):
         """Arm, takeoff, and prepare for reactive control."""
         try:
             self._cf.platform.send_arming_request(True)
+            time.sleep(1.0)  # Allow time for arming
             self.take_off(self.FLIGHT_HEIGHT)
+            time.sleep(1.0)  # Allow time for stabilization
             self._active = True
             self._log.info("RunAndTumbleBehavior started")
 
@@ -204,30 +208,29 @@ class RunAndTumbleBehavior(Behavior):
 
         counter = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
-
         alt = sample.values.get("kalman.stateZ")
+
+        if counter is None or vbattery is None or alt is None:
+            self._log.warning("Missing rangingCounter, vbat, or altitude in sample; ignoring")
+            return
+
         if isinstance(alt, (int, float)):
             self._last_altitude = float(alt)
 
-        if counter is None or vbattery is None:
-            self._log.warning("Missing rangingCounter or vbat in sample; ignoring")
-            return
+        if isinstance(counter, (int, float)):
+            counter = int(counter)
+
+        if isinstance(vbattery, (int, float)):
+            vbattery = float(vbattery)
 
         # Log counter with 2 seconds interval
         now = time.monotonic()
         if now - self._last_log >= 2.0:
             self._last_log = now
-            if isinstance(counter, (int, float)) and isinstance(vbattery, (int, float)):
-                self._log.info(
+            self._log.info(
                     "UWB counter: %d - Battery: %.2f V",
                     int(counter),
                     float(vbattery),
-                )
-            else:
-                self._log.info(
-                    "Missing/invalid data - counter=%r, vbat=%r",
-                    counter,
-                    vbattery,
                 )
 
         # Arrival Check
@@ -282,7 +285,6 @@ class RunAndTumbleBehavior(Behavior):
         """Stop, land, and disarm safely."""
         if not self._active:
             return
-
         try:
             self.land()
         except Exception:
@@ -294,12 +296,12 @@ class SinusoidalBehavior(Behavior):
     """Gradient-seeking navigation using sinusoidal yaw modulation."""
 
     # Tuning Parameters
-    VELOCITY_MPS = 0.3          # Forward flight speed
-    DITHER_OMEGA = 4.0          # Frequency of sine wave (rad/s)
-    DITHER_AMP = 0.5            # Amplitude of sine wave (rad/s)
-    GAIN = 25.0                 # Learning rate for the bias (Gradient Gain)
-    BIAS_LIMIT = 1.0            # Max yaw bias (rad/s) to prevent spinning
-    TARGET_DIST_M = 0.5         # Stop distance
+    VELOCITY_MPS = 0.3              # Forward flight speed
+    DITHER_OMEGA = 4.0              # Frequency of sine wave (rad/s)
+    DITHER_AMP = 0.5                # Amplitude of sine wave
+    GAIN = 25.0                     # Learning rate for the bias (Gradient Gain)
+    BIAS_LIMIT = 1.0                # Max yaw bias (rad/s) to prevent spinning
+    TARGET_DIST_COUNTER = 66100     # Stop distance
 
     # Landing/Safety Constants
     FLIGHT_HEIGHT = 0.5
@@ -307,7 +309,7 @@ class SinusoidalBehavior(Behavior):
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
         self._bias = 0.0
-        self._prev_dist: float | None = None
+        self._prev_counter: int | None = None
         self._active = False
 
     def on_start(self) -> None:
@@ -324,39 +326,44 @@ class SinusoidalBehavior(Behavior):
     def step(self, sample: SensorSample) -> None:
         if not self._active:
             return
-
+        
+        # Data
+        counter = sample.values.get("dw1k.rangingCounter")
         alt = sample.values.get("kalman.stateZ")
+
+        if counter is None or alt is None:
+            self._log.warning("Missing rangingCounter or altitude in sample; ignoring")
+            return
+
         if isinstance(alt, (int, float)):
             self._last_altitude = float(alt)
-
-        # Data
-        raw_counter = sample.values.get("dw1k.rangingCounter")
-        if raw_counter is None:
-            return
+        
+        if isinstance(counter, (int, float)):
+            counter = int(counter)
 
         # Convert to meters
-        try:
-            dist = ranging_counter_to_distance(int(raw_counter))
-        except (ValueError, TypeError):
-            return
+        # try:
+        #     dist = ranging_counter_to_distance(int(raw_counter))
+        # except (ValueError, TypeError):
+        #     return
 
         # Arrival Check
-        if dist < self.TARGET_DIST_M:
-            self._log.info("Target reached (%.2fm < %.2fm). Landing.", dist, self.TARGET_DIST_M)
+        if counter < self.TARGET_DIST_COUNTER:
+            self._log.info("Target reached (%d < %d). Landing.", counter, self.TARGET_DIST_COUNTER)
             self.land()
             self._active = False
             return
 
         # Algorithm (Extremum Seeking)
         # 1. Check prev_dist
-        if self._prev_dist is None:
-            self._prev_dist = dist
+        if self._prev_counter is None:
+            self._prev_counter = counter
             # Hover in place while initializing history
             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
             return
 
         # 2. Calculate delta
-        delta = dist - self._prev_dist
+        delta = counter - self._prev_counter
 
         # 3. Calculate sinusoidal perturbation
         now = time.monotonic()
@@ -373,13 +380,13 @@ class SinusoidalBehavior(Behavior):
         self._bias = max(-self.BIAS_LIMIT, min(self.BIAS_LIMIT, self._bias))
 
         # 7. Calculate Output
-        yaw_cmd = self._bias + dither
+        yaw_cmd = rad_to_deg(self._bias + dither)
 
         # 8. Actuate
         self._cf.commander.send_hover_setpoint(self.VELOCITY_MPS, 0.0, yaw_cmd, self.FLIGHT_HEIGHT)
 
         # 9. Update prev_dist
-        self._prev_dist = dist
+        self._prev_counter = counter
 
     def on_stop(self) -> None:
         """Stop hook: Execute safe landing if not already done."""
