@@ -63,7 +63,7 @@ VBAT_MIN: float = 3.3
 QUEUE_MAX_SIZE: int = 1
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
-CONTROLLER_MODE: str = "run_tumble"
+CONTROLLER_MODE: str = "sinusoidal"
 """
 Default controller mode. Options: 'idle', 'run_tumble', and 'sinusoidal'. Default is 'idle'.
 """

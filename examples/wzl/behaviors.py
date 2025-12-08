@@ -18,7 +18,6 @@ from constants import (
 
 from cflib.crazyflie import Crazyflie
 
-
 LOGGER = logging.getLogger(__name__)
 
 def ranging_counter_to_distance(counter: int) -> float:
@@ -60,10 +59,22 @@ class Behavior(ABC):
     STABILIZE_STEPS = 10
     FLIGHT_HEIGHT = 0.5  # Default flight height in meters
 
+    # Quadrant Check Constants
+    QC_SCAN_SPEED = 0.3     # m/s (Gentle speed)
+    QC_SCAN_TIME = 3.0      # seconds (Duration of each leg)
+    QC_TURN_SPEED = 45.0    # deg/s
+    
     def __init__(self, cf: "Crazyflie") -> None:
         self._cf = cf
         self._log = logging.getLogger(self.__class__.__name__)
         self._last_altitude: float | None = None
+
+        # Quadrant Detection State Variables
+        self._qc_state = 0
+        self._qc_timer = 0.0
+        self._qc_min_counter = float('inf')
+        self._qc_scores = [0.0, 0.0, 0.0, 0.0]  # [Fwd, Back, Left, Right]
+        self._qc_target_yaw = 0.0
 
     @abstractmethod
     def on_start(self) -> None:
@@ -132,6 +143,151 @@ class Behavior(ABC):
         except Exception:
             self._log.warning("Failed to disarm", exc_info=True)
 
+    # --------------------------------------------------------------------------
+    # Quadrant Detection Logic
+    # --------------------------------------------------------------------------
+    def init_quadrant_check(self) -> None:
+        """Reset the state machine for the quadrant check."""
+        self._qc_state = 0
+        self._qc_min_counter = float('inf')
+        self._qc_scores = [0.0, 0.0, 0.0, 0.0]
+        self._qc_timer = time.monotonic()
+        self._log.info("Quadrant Check: Initialized")
+
+    def run_quadrant_check_step(self, sample: SensorSample) -> bool:
+        """
+        Execute one step of the "Plus Sign" maneuver.
+        
+        Returns:
+            True if the process is complete (drone is aligned).
+            False if the process is still running.
+        """
+
+        if self._qc_state == 10:
+            return True
+        
+        # Extract data
+        counter = sample.values.get("dw1k.rangingCounter")
+        if counter is not None:
+            # Track minimum distance seen during this specific leg
+            if counter < self._qc_min_counter:
+                self._qc_min_counter = counter
+        else:
+            self._log.warning("Quadrant Check: Missing rangingCounter in sample; ignoring")
+
+        now = time.monotonic()
+        dt = now - self._qc_timer
+        
+        # State Machine
+        # 0: Start / Hover Stabilize
+        # 1: FWD OUT (+X) | 2: FWD IN (-X)
+        # 3: BCK OUT (-X) | 4: BCK IN (+X)
+        # 5: LFT OUT (+Y) | 6: LFT IN (-Y)
+        # 7: RGT OUT (-Y) | 8: RGT IN (+Y)
+        # 9: CALC & TURN  | 10: DONE
+
+        vx, vy, yaw_rate = 0.0, 0.0, 0.0
+
+        # Helper to transition states
+        def next_state(reset_min=True):
+            self._qc_state += 1
+            self._qc_timer = now
+            if reset_min:
+                self._qc_min_counter = float('inf')
+
+        if self._qc_state == 0:
+            # Hover for 1s to settle
+            if dt > 1.0:
+                self._log.info("Quadrant Check: Starting X-axis scan")
+                next_state()
+
+        # --- Forward Leg ---
+        elif self._qc_state == 1: # Out
+            vx = self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                self._qc_scores[0] = self._qc_min_counter  # Save Score FWD
+                next_state(reset_min=False) # Don't need min for return
+        elif self._qc_state == 2: # Return
+            vx = -self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                next_state()
+
+        # --- Backward Leg ---
+        elif self._qc_state == 3: # Out
+            vx = -self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                self._qc_scores[1] = self._qc_min_counter  # Save Score BACK
+                next_state(reset_min=False)
+        elif self._qc_state == 4: # Return
+            vx = self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                self._log.info("Quadrant Check: X done. Scores (Fwd/Back): %s", 
+                               [int(s) for s in self._qc_scores[:2]])
+                next_state()
+
+        # --- Left Leg (+Y) ---
+        elif self._qc_state == 5: # Out
+            vy = self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                self._qc_scores[2] = self._qc_min_counter  # Save Score LEFT
+                next_state(reset_min=False)
+        elif self._qc_state == 6: # Return
+            vy = -self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                next_state()
+
+        # --- Right Leg (-Y) ---
+        elif self._qc_state == 7: # Out
+            vy = -self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                self._qc_scores[3] = self._qc_min_counter  # Save Score RIGHT
+                next_state(reset_min=False)
+        elif self._qc_state == 8: # Return
+            vy = self.QC_SCAN_SPEED
+            if dt > self.QC_SCAN_TIME:
+                next_state()
+
+        # --- Calculation & Alignment ---
+        elif self._qc_state == 9:
+            # Lower score is better (smaller distance counter)
+            fwd, back, left, right = self._qc_scores
+            
+            # Determine vectors
+            # X: +1 if Fwd < Back, else -1
+            x_dir = 1.0 if fwd < back else -1.0
+            
+            # Y: +1 if Left < Right, else -1
+            y_dir = 1.0 if left < right else -1.0
+
+            # Calculate angle
+            # atan2(y, x) gives angle from X-axis
+            target_rad = math.atan2(y_dir, x_dir)
+            target_deg = rad_to_deg(target_rad)
+
+            self._log.info("Quadrant Check: Result X=%d, Y=%d -> Target Yaw %.1f deg", 
+                           int(x_dir), int(y_dir), target_deg)
+            
+            # Simple Turn: P-controller or timed turn?
+            # Timed turn is safer given we don't track current yaw well without logging it
+            # Assuming we started at 0 yaw and haven't drifted much:
+            turn_duration = abs(target_deg) / self.QC_TURN_SPEED
+            yaw_rate = math.copysign(self.QC_TURN_SPEED, target_deg)
+            
+            if dt > turn_duration:
+                self._log.info("Quadrant Check: Alignment complete")
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                next_state()
+            else:
+                # We need to explicitly return here to apply the yaw_rate
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
+                return False
+
+        # Apply velocity command for the active scan states
+        if self._qc_state < 9:
+            self._cf.commander.send_hover_setpoint(vx, vy, 0.0, self.FLIGHT_HEIGHT)
+
+        return False
+
 class IdleBehavior(Behavior):
     """Safe default behavior that performs no motion commands."""
 
@@ -175,10 +331,10 @@ class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
     
     # --- Control Parameters for Run & Tumble ---
-    SEARCH_VELOCITY_MPS: float = 0.4    # Forward speed when running
-    TUMBLE_RATE_DEG_S: float = 60      # Yaw rate when tumbling (searching)
-    GRADIENT_THRESHOLD_COUNTER: float = 6  # Sensitivity to distance change (counters)
-    TARGET_COUNTER: float = 66250        # Distance to stop from anchor (counters) 
+    SEARCH_VELOCITY_MPS: float = 0.3        # Forward speed when running
+    TUMBLE_RATE_DEG_S: float = 45           # Yaw rate when tumbling (searching)
+    GRADIENT_THRESHOLD_COUNTER: float = 6   # Sensitivity to distance change (counters)
+    TARGET_COUNTER: float = 66250           # Distance to stop from anchor (counters) 
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -196,6 +352,7 @@ class RunAndTumbleBehavior(Behavior):
             self.take_off(self.FLIGHT_HEIGHT)
             self._active = True
             self._log.info("RunAndTumbleBehavior started")
+            self.init_quadrant_check()
 
         except Exception:
             self._log.exception("RunAndTumbleBehavior failed to start")
@@ -203,6 +360,10 @@ class RunAndTumbleBehavior(Behavior):
 
     def step(self, sample: SensorSample) -> None:
         if not self._active:
+            return
+        
+        if not self.run_quadrant_check_step(sample):
+            # Still running quadrant check
             return
 
         counter = sample.values.get("dw1k.rangingCounter")
@@ -295,12 +456,12 @@ class SinusoidalBehavior(Behavior):
     """Gradient-seeking navigation using sinusoidal yaw modulation."""
 
     # Tuning Parameters
-    VELOCITY_MPS = 0.40              # Forward flight speed
-    DITHER_OMEGA = 3.0              # Frequency of sine wave (rad/s)
-    DITHER_AMP = 0.8                # Amplitude of sine wave
+    VELOCITY_MPS = 0.30             # Forward flight speed
+    DITHER_OMEGA = 2.5              # Frequency of sine wave (rad/s)
+    DITHER_AMP = 1.0                # Amplitude of sine wave
     GAIN = 20.0                     # Learning rate for the bias (Gradient Gain)
-    BIAS_LIMIT = 1.2                # Max yaw bias (rad/s) to prevent spinning
-    TARGET_DIST_COUNTER = 66250     # Stop distance
+    BIAS_LIMIT = 1.0                # Max yaw bias (rad/s) to prevent spinning
+    TARGET_DIST_COUNTER = 66200     # Stop distance
 
     # Landing/Safety Constants
     FLIGHT_HEIGHT = 0.5
@@ -320,6 +481,7 @@ class SinusoidalBehavior(Behavior):
             self.take_off(self.FLIGHT_HEIGHT)
             time.sleep(1.0)  # Allow time for stabilization
             self._active = True
+            self.init_quadrant_check()
             self._log.info("SinusoidalBehavior started")
         except Exception:
             self._log.exception("SinusoidalBehavior failed to start")
@@ -327,6 +489,10 @@ class SinusoidalBehavior(Behavior):
 
     def step(self, sample: SensorSample) -> None:
         if not self._active:
+            return
+        
+        if not self.run_quadrant_check_step(sample):
+            # Still running quadrant check
             return
         
         # Data
@@ -338,14 +504,9 @@ class SinusoidalBehavior(Behavior):
             self._log.warning("Missing rangingCounter, altitude, or battery voltage in sample; ignoring")
             return
 
-        if isinstance(alt, (int, float)):
-            self._last_altitude = float(alt)
-        
-        if isinstance(counter, (int, float)):
-            counter = int(counter)
-
-        if isinstance(vbattery, (int, float)):
-            vbattery = float(vbattery)
+        self._last_altitude = float(alt)
+        counter = int(counter)
+        vbattery = float(vbattery)
 
         # Logging
         now = time.monotonic()
@@ -385,6 +546,9 @@ class SinusoidalBehavior(Behavior):
         # 4. Gradient Update
         # Logic: If moving Closer (delta < 0) while Turning Left (dither > 0), correction is positive.
         correction = -self.GAIN * delta * dither
+
+        self._log.info("Delta: %d, Dither: %.3f, Correction: %.3f, New Bias: %.3f", 
+                       delta, dither, correction, self._bias + correction)
 
         # 5. Update Bias
         self._bias += correction
