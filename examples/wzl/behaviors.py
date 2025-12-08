@@ -61,7 +61,9 @@ class Behavior(ABC):
 
     # Quadrant Check Constants
     QC_SCAN_SPEED = 0.3     # m/s (Gentle speed)
-    QC_SCAN_TIME = 3.0      # seconds (Duration of each leg)
+    QC_TRANSIT_TIME = 2.0   # seconds
+    QC_COLLECT_TIME = 1.0   # seconds
+    QC_STABILIZE_TIME = 0.5 # seconds
     QC_TURN_SPEED = 45.0    # deg/s
     
     def __init__(self, cf: "Crazyflie") -> None:
@@ -154,137 +156,116 @@ class Behavior(ABC):
         self._qc_timer = time.monotonic()
         self._log.info("Quadrant Check: Initialized")
 
+    def _check_timer(self, duration: float) -> bool:
+        """Check if the specified duration has passed since self._qc_timer."""
+        return (time.monotonic() - self._qc_timer) >= duration
+
     def run_quadrant_check_step(self, sample: SensorSample) -> bool:
         """
-        Execute one step of the "Plus Sign" maneuver.
+        Execute one step of the "Plus Sign" maneuver with Move-Stop-Measure strategy.
         
         Returns:
             True if the process is complete (drone is aligned).
             False if the process is still running.
         """
-
-        if self._qc_state == 10:
+        # Done state
+        if self._qc_state == 20:
             return True
         
-        # Extract data
-        counter = sample.values.get("dw1k.rangingCounter")
-        if counter is not None:
-            # Track minimum distance seen during this specific leg
-            if counter < self._qc_min_counter:
-                self._qc_min_counter = counter
-        else:
-            self._log.warning("Quadrant Check: Missing rangingCounter in sample; ignoring")
-
-        now = time.monotonic()
-        dt = now - self._qc_timer
-        
-        # State Machine
-        # 0: Start / Hover Stabilize
-        # 1: FWD OUT (+X) | 2: FWD IN (-X)
-        # 3: BCK OUT (-X) | 4: BCK IN (+X)
-        # 5: LFT OUT (+Y) | 6: LFT IN (-Y)
-        # 7: RGT OUT (-Y) | 8: RGT IN (+Y)
-        # 9: CALC & TURN  | 10: DONE
-
-        vx, vy, yaw_rate = 0.0, 0.0, 0.0
-
         # Helper to transition states
-        def next_state(reset_min=True):
+        now = time.monotonic()
+        def next_state():
             self._qc_state += 1
             self._qc_timer = now
-            if reset_min:
-                self._qc_min_counter = float('inf')
 
+        # Extract ranging counter (last sample used for scoring)
+        counter = sample.values.get("dw1k.rangingCounter")
+
+        # --- State 0: Start / Initial Stabilize ---
         if self._qc_state == 0:
-            # Hover for 1s to settle
-            if dt > 1.0:
-                self._log.info("Quadrant Check: Starting X-axis scan")
+            if self._check_timer(1.0):
+                self._log.info("Quadrant Check: Starting sequence")
                 next_state()
+            else:
+                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            return False
 
-        # --- Forward Leg ---
-        elif self._qc_state == 1: # Out
-            vx = self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                self._qc_scores[0] = self._qc_min_counter  # Save Score FWD
-                next_state(reset_min=False) # Don't need min for return
-        elif self._qc_state == 2: # Return
-            vx = -self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                next_state()
+        # --- Scan Legs (States 1-16) ---
+        # 4 Legs: FWD(0), BACK(1), LEFT(2), RIGHT(3)
+        # 4 Phases per Leg: TRANSIT(0), COLLECT(1), RETURN(2), STABILIZE(3)
+        if 1 <= self._qc_state <= 16:
+            leg_index = (self._qc_state - 1) // 4
+            phase_index = (self._qc_state - 1) % 4
 
-        # --- Backward Leg ---
-        elif self._qc_state == 3: # Out
-            vx = -self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                self._qc_scores[1] = self._qc_min_counter  # Save Score BACK
-                next_state(reset_min=False)
-        elif self._qc_state == 4: # Return
-            vx = self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                self._log.info("Quadrant Check: X done. Scores (Fwd/Back): %s", 
-                               [int(s) for s in self._qc_scores[:2]])
-                next_state()
+            # Directions: Fwd(+X), Back(-X), Left(+Y), Right(-Y)
+            directions = [
+                (self.QC_SCAN_SPEED, 0.0),
+                (-self.QC_SCAN_SPEED, 0.0),
+                (0.0, self.QC_SCAN_SPEED),
+                (0.0, -self.QC_SCAN_SPEED)
+            ]
+            dx, dy = directions[leg_index]
 
-        # --- Left Leg (+Y) ---
-        elif self._qc_state == 5: # Out
-            vy = self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                self._qc_scores[2] = self._qc_min_counter  # Save Score LEFT
-                next_state(reset_min=False)
-        elif self._qc_state == 6: # Return
-            vy = -self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                next_state()
+            vx, vy = 0.0, 0.0
 
-        # --- Right Leg (-Y) ---
-        elif self._qc_state == 7: # Out
-            vy = -self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                self._qc_scores[3] = self._qc_min_counter  # Save Score RIGHT
-                next_state(reset_min=False)
-        elif self._qc_state == 8: # Return
-            vy = self.QC_SCAN_SPEED
-            if dt > self.QC_SCAN_TIME:
-                next_state()
+            # Phase Logic
+            if phase_index == 0: # Transit Out
+                vx, vy = dx, dy
+                if self._check_timer(self.QC_TRANSIT_TIME):
+                    next_state()
 
-        # --- Calculation & Alignment ---
-        elif self._qc_state == 9:
+            elif phase_index == 1: # Collect (Stop & Measure)
+                vx, vy = 0.0, 0.0
+                if counter is not None:
+                    self._qc_scores[leg_index] = counter
+
+                if self._check_timer(self.QC_COLLECT_TIME):
+                    next_state()
+
+            elif phase_index == 2: # Return
+                vx, vy = -dx, -dy
+                if self._check_timer(self.QC_TRANSIT_TIME):
+                    next_state()
+
+            elif phase_index == 3: # Stabilize
+                vx, vy = 0.0, 0.0
+                if self._check_timer(self.QC_STABILIZE_TIME):
+                    if leg_index == 3:
+                        self._log.info("Quadrant Check: All legs done. Scores: %s", self._qc_scores)
+                    next_state()
+
+            self._cf.commander.send_hover_setpoint(vx, vy, 0.0, self.FLIGHT_HEIGHT)
+            return False
+
+        # --- Calculation & Alignment (State 17) ---
+        elif self._qc_state == 17:
             # Lower score is better (smaller distance counter)
             fwd, back, left, right = self._qc_scores
             
             # Determine vectors
-            # X: +1 if Fwd < Back, else -1
             x_dir = 1.0 if fwd < back else -1.0
-            
-            # Y: +1 if Left < Right, else -1
             y_dir = 1.0 if left < right else -1.0
 
             # Calculate angle
-            # atan2(y, x) gives angle from X-axis
             target_rad = math.atan2(y_dir, x_dir)
             target_deg = rad_to_deg(target_rad)
 
             self._log.info("Quadrant Check: Result X=%d, Y=%d -> Target Yaw %.1f deg", 
                            int(x_dir), int(y_dir), target_deg)
             
-            # Simple Turn: P-controller or timed turn?
-            # Timed turn is safer given we don't track current yaw well without logging it
-            # Assuming we started at 0 yaw and haven't drifted much:
             turn_duration = abs(target_deg) / self.QC_TURN_SPEED
             yaw_rate = math.copysign(self.QC_TURN_SPEED, target_deg)
             
-            if dt > turn_duration:
+            # Using _check_timer for turn duration
+            # Note: _qc_timer was reset when entering state 17 (from state 16 transition)
+            if self._check_timer(turn_duration):
                 self._log.info("Quadrant Check: Alignment complete")
                 self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-                next_state()
+                self._qc_state = 20 # Done
+                self._qc_timer = now
             else:
-                # We need to explicitly return here to apply the yaw_rate
                 self._cf.commander.send_hover_setpoint(0.0, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
                 return False
-
-        # Apply velocity command for the active scan states
-        if self._qc_state < 9:
-            self._cf.commander.send_hover_setpoint(vx, vy, 0.0, self.FLIGHT_HEIGHT)
 
         return False
 
