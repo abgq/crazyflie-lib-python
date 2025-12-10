@@ -106,33 +106,24 @@ class CrazyflieLogger:
         """Handle new log data coming from cflib."""
         if not self._running:
             return
-        
+
         now = time.monotonic()
         LOGGER.info("Time: %10.3f - Raw data from '%s': %s", now, logconf.name, data)
 
-        # Apply filtering immediately
-        if self._filter.is_enabled():
-            # We need to list items because we might delete keys during iteration
-            for name, value in list(data.items()):
-                if isinstance(value, numbers.Real):
-                    try:
-                        filtered_val = self._filter.update(name, float(value))
-                        if filtered_val is not None:
-                            data[name] = filtered_val
-                        else:
-                            # Value rejected. Remove it from the dataset to prevent
-                            # the controller from acting on stale or raw data.
-                            del data[name]
-                    except ValueError:
-                        LOGGER.warning("Variable '%s' not found in filter bank, leaving as-is", name)
-                        pass  # Variable not in filter bank, leave as-is
-
-        now = time.monotonic()
+        # 1. Update State with RAW data (The "Zero-Order Hold")
         with self._lock:
             self._latest_values.update(data)
             snapshot = dict(self._latest_values)
 
+        # 2. Create Sample
         sample = SensorSample(timestamp=now, values=snapshot)
+
+        # 3. Apply Filtering (Sanitize the Output)
+        # This will set values to None if they are stale or outliers
+        if self._filter.is_enabled():
+            self._filter.process_sample(sample)
+
+        # 4. Push to Controller
         self._push_sample(sample)
         LOGGER.debug("Logged data from '%s': %s", logconf.name, data)
 
