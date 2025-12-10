@@ -60,20 +60,21 @@ class Behavior(ABC):
     FLIGHT_HEIGHT = 0.5  # Default flight height in meters
 
     # Quadrant Check Constants
-    QC_SCAN_SPEED = 0.3     # m/s (Gentle speed)
-    QC_TRANSIT_TIME = 2.0   # seconds
-    QC_COLLECT_TIME = 1.0   # seconds
+    QC_SCAN_SPEED = 0.25     # m/s (Gentle speed)
+    QC_TRANSIT_TIME = 2.5   # seconds
+    QC_COLLECT_TIME = 1.5   # seconds
     QC_STABILIZE_TIME = 0.5 # seconds
-    QC_TURN_SPEED = 45.0    # deg/s
+    QC_TURN_SPEED = 30.0    # deg/s
     
     def __init__(self, cf: "Crazyflie") -> None:
         self._cf = cf
         self._log = logging.getLogger(self.__class__.__name__)
         self._last_altitude: float | None = None
 
+        self.sleep_timer = 0.0
+
         # Quadrant Detection State Variables
         self._qc_state = 0
-        self._qc_timer = 0.0
         self._qc_min_counter = float('inf')
         self._qc_scores = [0.0, 0.0, 0.0, 0.0]  # [Fwd, Back, Left, Right]
         self._qc_target_yaw = 0.0
@@ -93,7 +94,7 @@ class Behavior(ABC):
     def take_off(self, target_height: float, duration: float = 2.0) -> None:
         """Execute a blocking takeoff sequence."""
         self._cf.platform.send_arming_request(True)
-        time.sleep(1.5)  # Allow time for arming
+        time.sleep(2.0)  # Allow time for arming
         self._log.info("Taking off to %.2f m over %.1f s", target_height, duration)
         steps = int(duration / self.LANDING_SLEEP)
         for i in range(steps):
@@ -145,6 +146,9 @@ class Behavior(ABC):
         except Exception:
             self._log.warning("Failed to disarm", exc_info=True)
 
+    def sleep_nb(self, duration: float) -> bool:
+        """Check if the specified duration has passed since self._qc_timer."""
+        return (time.monotonic() - self.sleep_timer) >= duration
     # --------------------------------------------------------------------------
     # Quadrant Detection Logic
     # --------------------------------------------------------------------------
@@ -153,12 +157,8 @@ class Behavior(ABC):
         self._qc_state = 0
         self._qc_min_counter = float('inf')
         self._qc_scores = [0.0, 0.0, 0.0, 0.0]
-        self._qc_timer = time.monotonic()
+        self.sleep_timer = time.monotonic()
         self._log.info("Quadrant Check: Initialized")
-
-    def _check_timer(self, duration: float) -> bool:
-        """Check if the specified duration has passed since self._qc_timer."""
-        return (time.monotonic() - self._qc_timer) >= duration
 
     def run_quadrant_check_step(self, sample: SensorSample) -> bool:
         """
@@ -171,19 +171,20 @@ class Behavior(ABC):
         # Done state
         if self._qc_state == 20:
             return True
-        
-        # Helper to transition states
-        now = time.monotonic()
-        def next_state():
-            self._qc_state += 1
-            self._qc_timer = now
 
         # Extract ranging counter (last sample used for scoring)
         counter = sample.values.get("dw1k.rangingCounter")
 
+        # Helper to transition states
+        now = time.monotonic()
+
+        def next_state():
+            self._qc_state += 1
+            self.sleep_timer = now
+
         # --- State 0: Start / Initial Stabilize ---
         if self._qc_state == 0:
-            if self._check_timer(1.0):
+            if self.sleep_nb(0.1):
                 self._log.info("Quadrant Check: Starting sequence")
                 next_state()
             else:
@@ -211,7 +212,7 @@ class Behavior(ABC):
             # Phase Logic
             if phase_index == 0: # Transit Out
                 vx, vy = dx, dy
-                if self._check_timer(self.QC_TRANSIT_TIME):
+                if self.sleep_nb(self.QC_TRANSIT_TIME):
                     next_state()
 
             elif phase_index == 1: # Collect (Stop & Measure)
@@ -219,17 +220,17 @@ class Behavior(ABC):
                 if counter is not None:
                     self._qc_scores[leg_index] = counter
 
-                if self._check_timer(self.QC_COLLECT_TIME):
+                if self.sleep_nb(self.QC_COLLECT_TIME):
                     next_state()
 
             elif phase_index == 2: # Return
                 vx, vy = -dx, -dy
-                if self._check_timer(self.QC_TRANSIT_TIME):
+                if self.sleep_nb(self.QC_TRANSIT_TIME):
                     next_state()
 
             elif phase_index == 3: # Stabilize
                 vx, vy = 0.0, 0.0
-                if self._check_timer(self.QC_STABILIZE_TIME):
+                if self.sleep_nb(self.QC_STABILIZE_TIME):
                     if leg_index == 3:
                         self._log.info("Quadrant Check: All legs done. Scores: %s", self._qc_scores)
                     next_state()
@@ -241,6 +242,8 @@ class Behavior(ABC):
         elif self._qc_state == 17:
             # Lower score is better (smaller distance counter)
             fwd, back, left, right = self._qc_scores
+
+            self._log.info("Quadrant Scores: Fwd=%.1f, Back=%.1f, Left=%.1f, Right=%.1f", fwd, back, left, right)
             
             # Determine vectors
             x_dir = 1.0 if fwd < back else -1.0
@@ -258,15 +261,14 @@ class Behavior(ABC):
             
             # Using _check_timer for turn duration
             # Note: _qc_timer was reset when entering state 17 (from state 16 transition)
-            if self._check_timer(turn_duration):
+            if self.sleep_nb(turn_duration):
                 self._log.info("Quadrant Check: Alignment complete")
                 self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
                 self._qc_state = 20 # Done
-                self._qc_timer = now
+                self.sleep_timer = now
             else:
                 self._cf.commander.send_hover_setpoint(0.0, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
                 return False
-
         return False
 
 class IdleBehavior(Behavior):
@@ -437,15 +439,17 @@ class SinusoidalBehavior(Behavior):
     """Gradient-seeking navigation using sinusoidal yaw modulation."""
 
     # Tuning Parameters
-    VELOCITY_MPS = 0.30             # Forward flight speed
-    DITHER_OMEGA = 2.5              # Frequency of sine wave (rad/s)
-    DITHER_AMP = 1.0                # Amplitude of sine wave
-    GAIN = 20.0                     # Learning rate for the bias (Gradient Gain)
-    BIAS_LIMIT = 1.0                # Max yaw bias (rad/s) to prevent spinning
-    TARGET_DIST_COUNTER = 66200     # Stop distance
+    VELOCITY_MPS = 0.25             # Forward flight speed
+    DITHER_OMEGA = 0.50              # Frequency of sine wave (rad/s)
+    DITHER_AMP = 0.75                # Amplitude of sine wave
+    GAIN = 0.2                     # Learning rate for the bias (Gradient Gain)
+    BIAS_LIMIT = 0.40                # Max yaw bias (rad/s) to prevent spinning
+    TARGET_DIST_COUNTER = 66500     # Stop distance
 
     # Landing/Safety Constants
-    FLIGHT_HEIGHT = 0.5
+    FLIGHT_HEIGHT = 0.4
+
+    UPDATE_BIAS_EVERY_N = 5          # Update bias every Nth step
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -453,6 +457,8 @@ class SinusoidalBehavior(Behavior):
         self._prev_counter: int | None = None
         self._active = False
         self._last_log: float = 0.0
+        self._update_bias_counter = 0
+
 
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for sinusoidal control."""
@@ -472,9 +478,9 @@ class SinusoidalBehavior(Behavior):
         if not self._active:
             return
         
-        if not self.run_quadrant_check_step(sample):
-            # Still running quadrant check
-            return
+        # if not self.run_quadrant_check_step(sample):
+        #     # Still running quadrant check
+        #     return
         
         # Data
         vbattery = sample.values.get("pm.vbat")
@@ -517,28 +523,32 @@ class SinusoidalBehavior(Behavior):
             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
             return
 
-        # 2. Calculate delta
-        delta = counter - self._prev_counter
-
         # 3. Calculate sinusoidal perturbation
         now = time.monotonic()
         dither = self.DITHER_AMP * math.sin(self.DITHER_OMEGA * now)
 
-        # 4. Gradient Update
-        # Logic: If moving Closer (delta < 0) while Turning Left (dither > 0), correction is positive.
-        correction = -self.GAIN * delta * dither
+        if self._update_bias_counter == self.UPDATE_BIAS_EVERY_N:
+            # 2. Calculate delta
+            delta = counter - self._prev_counter
 
-        self._log.info("Delta: %d, Dither: %.3f, Correction: %.3f, New Bias: %.3f", 
-                       delta, dither, correction, self._bias + correction)
+            # 4. Gradient Update
+            # Logic: If moving Closer (delta < 0) while Turning Left (dither > 0), correction is positive.
+            correction = -self.GAIN * delta * dither
 
-        # 5. Update Bias
-        self._bias += correction
+            # 5. Update Bias
+            self._bias += correction
 
-        # 6. Clamp Bias
-        self._bias = max(-self.BIAS_LIMIT, min(self.BIAS_LIMIT, self._bias))
+            # 6. Clamp Bias
+            self._bias = max(-self.BIAS_LIMIT, min(self.BIAS_LIMIT, self._bias))
+
+            self._update_bias_counter = 0
+        else:
+            self._update_bias_counter += 1
 
         # 7. Calculate Output
         yaw_cmd = rad_to_deg(self._bias + dither)
+
+        self._log.info("Dither: %.3f, Bias: %.3f, Yaw Cmd: %.2f deg", dither, self._bias, yaw_cmd)
 
         # 8. Actuate
         self._cf.commander.send_hover_setpoint(self.VELOCITY_MPS, 0.0, yaw_cmd, self.FLIGHT_HEIGHT)
