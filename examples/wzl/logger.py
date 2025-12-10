@@ -106,6 +106,9 @@ class CrazyflieLogger:
         """Handle new log data coming from cflib."""
         if not self._running:
             return
+        
+        now = time.monotonic()
+        LOGGER.info("Time: %10.3f - Raw data from '%s': %s", now, logconf.name, data)
 
         # Apply filtering immediately
         if self._filter.is_enabled():

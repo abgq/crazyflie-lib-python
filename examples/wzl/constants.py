@@ -19,38 +19,40 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "pm.vbat",
-                # No filter configuration (defaulting to NoFilter)
             },
         ],
     },
     {
         "name": "UWB",
-        "period_ms": 20,  # 50 Hz logging
+        "period_ms": 10,  # 100 Hz logging
         "variables": [
             {
                 "name": "dw1k.rangingCounter",
-                "filter": [
-                    {
-                        "type": "StepLimit",
-                        "threshold": 1000
-                    },
-                    {
-                        "type": "SMA",
-                        "window": 5
-                    }
-                ]
+                # "filter": [
+                #     {
+                #         "type": "StepLimit",
+                #         "threshold": 1000
+                #     },
+                #     {
+                #         "type": "SMA",
+                #         "window": 5
+                #     }
+                # ]
             },
-        ],
-    },
-    {
-        "name": "state",
-        "period_ms": 100,  # 10 Hz logging
-        "variables": [
             {
-                "name": "kalman.stateZ",
-            },
+                "name": "dw1k.measurementNumber",
+            }
         ],
     },
+    # {
+    #     "name": "state",
+    #     "period_ms": 100,  # 10 Hz logging
+    #     "variables": [
+    #         {
+    #             "name": "kalman.stateZ",
+    #         },
+    #     ],
+    # },
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 
@@ -63,7 +65,7 @@ VBAT_MIN: float = 3.3
 QUEUE_MAX_SIZE: int = 1
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
-CONTROLLER_MODE: str = "sinusoidal"
+CONTROLLER_MODE: str = "idle"
 """
 Default controller mode. Options: 'idle', 'run_tumble', and 'sinusoidal'. Default is 'idle'.
 """

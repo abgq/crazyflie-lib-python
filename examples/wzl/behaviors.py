@@ -279,8 +279,8 @@ class IdleBehavior(Behavior):
         self._last_log = 0.0
 
     def on_start(self) -> None:
+        time.sleep(2.0)  # Allow time for stabilization
         self._log.info("IdleBehavior started: no motion commands will be sent")
-
     def on_stop(self) -> None:
         self._log.info("IdleBehavior stopped")
 
@@ -290,25 +290,18 @@ class IdleBehavior(Behavior):
         vbattery = sample.values.get("pm.vbat")
         alt = sample.values.get("kalman.stateZ")
 
-        # Update altitude even in Idle for consistency/debugging
-        if isinstance(alt, (int, float)):
-            self._last_altitude = float(alt)
-
+        if alt is None or vbattery is None or raw is None:
+            return
+        
         now = time.monotonic()
-        if now - self._last_log >= 1.0:
+        if now - self._last_log >= 0.0:
             self._last_log = now
-            if isinstance(raw, (int, float)) and isinstance(vbattery, (int, float)):
-                self._log.info(
-                    "IdleBehavior: UWB counter: %d - Battery: %.2f V",
-                    int(raw),
-                    float(vbattery),
-                )
-            else:
-                self._log.info(
-                    "IdleBehavior: missing/invalid data – counter=%r, vbat=%r",
-                    raw,
-                    vbattery,
-                )
+            self._log.info(
+                "IdleBehavior: Altitude: %.2f m, UWB counter: %s, Battery: %.2f V",
+                float(alt),
+                int(raw),
+                float(vbattery),
+            )
 
 class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
