@@ -6,6 +6,14 @@ import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Deque, Dict, Iterable, List, Optional
+import numbers
+
+# Prevent circular imports if we needed to import SensorSample,
+# but we can just use Any/Duck Typing for the sample object in FilterBank.
+# If we need type hinting we can use TYPE_CHECKING
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from logger import SensorSample
 
 LOGGER = logging.getLogger(__name__)
 
@@ -14,14 +22,14 @@ class SignalFilter(ABC):
     """Abstract base class for signal filters."""
 
     @abstractmethod
-    def update(self, value: float) -> Optional[float]:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> Optional[float]:
         """Process a new sample and return the filtered value, or None to reject."""
 
 
 class NoFilter(SignalFilter):
     """Returns the value immediately without modification."""
 
-    def update(self, value: float) -> float:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> float:
         return value
 
 
@@ -32,7 +40,7 @@ class StepLimitFilter(SignalFilter):
         self.threshold = float(threshold)
         self.last_valid_value: Optional[float] = None
 
-    def update(self, value: float) -> Optional[float]:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> Optional[float]:
         if self.last_valid_value is None:
             self.last_valid_value = value
             return value
@@ -45,16 +53,49 @@ class StepLimitFilter(SignalFilter):
         return value
 
 
+class FreshnessFilter(SignalFilter):
+    """Rejects values if the trigger variable has not changed."""
+
+    def __init__(self, trigger_var: str) -> None:
+        self.trigger_var = trigger_var
+        self.last_trigger_val: Any = None
+
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> Optional[float]:
+        if context is None:
+            # Safer to reject if no context provided when one is required
+            return None
+
+        if self.trigger_var not in context:
+            # Trigger variable missing from context -> Reject
+            return None
+
+        current_trigger_val = context[self.trigger_var]
+
+        # Initial case: always fresh
+        if self.last_trigger_val is None:
+            self.last_trigger_val = current_trigger_val
+            return value
+
+        # Check for change
+        if current_trigger_val == self.last_trigger_val:
+            # Duplicate / Stale -> Reject
+            return None
+
+        # Value is fresh
+        self.last_trigger_val = current_trigger_val
+        return value
+
+
 class ChainFilter(SignalFilter):
     """Runs a sequence of filters; stops and returns None if any filter returns None."""
 
     def __init__(self, filters: List[SignalFilter]) -> None:
         self.filters = list(filters)
 
-    def update(self, value: float) -> Optional[float]:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> Optional[float]:
         current_val = value
         for f in self.filters:
-            out = f.update(current_val)
+            out = f.update(current_val, context=context)
             if out is None:
                 return None
             current_val = out
@@ -68,7 +109,7 @@ class MovingAverageFilter(SignalFilter):
         self.window_size = int(window_size)
         self.buffer: Deque[float] = deque(maxlen=self.window_size)
 
-    def update(self, value: float) -> float:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> float:
         if self.window_size <= 0:
             return value
         self.buffer.append(value)
@@ -82,7 +123,7 @@ class ExponentialFilter(SignalFilter):
         self.alpha = float(alpha)
         self.last_value: Optional[float] = None
 
-    def update(self, value: float) -> float:
+    def update(self, value: float, context: Dict[str, Any] | None = None) -> float:
         if self.last_value is None:
             self.last_value = value
             return value
@@ -114,15 +155,33 @@ class FilterBank:
         """Return ``True`` if any variable requests filtering."""
         return self._enabled
 
-    def update(self, name: str, value: float) -> Optional[float]:
-        """Return the filtered value for ``name``.
+    def process_sample(self, sample: SensorSample) -> None:
+        """Apply filters to the sample in-place.
 
-        Raises:
-            ValueError: If ``name`` is not a known variable.
+        Args:
+            sample: The SensorSample to process. values modified in-place.
         """
-        if name not in self.filters:
-            raise ValueError(f"Unknown variable '{name}' in FilterBank update")
-        return self.filters[name].update(value)
+        if not self.is_enabled():
+            return
+
+        # Iterate through configured filters to be efficient
+        for name, filter_instance in self.filters.items():
+            if name in sample.values:
+                val = sample.values[name]
+                # Only filter numeric values
+                if isinstance(val, numbers.Real):
+                    try:
+                        filtered_val = filter_instance.update(float(val), context=sample.values)
+                        # Explicitly set to filtered_val (which might be None)
+                        sample.values[name] = filtered_val
+                    except Exception:
+                         # Catch any filter errors to prevent crashing the loop
+                         LOGGER.exception("Error filtering variable '%s'", name)
+                         # Safe fallback? Leave as is or set None?
+                         # User instruction implies "Fail Safe", but exception here is unexpected code error.
+                         # Leaving as-is is safer than deleting data on bug, but 'None' is safer for control.
+                         # I will leave as is to preserve raw data for debugging unless instructed otherwise.
+                         pass
 
     def _create_single_filter(self, filter_cfg: Dict[str, Any], var_name: str) -> SignalFilter:
         """Instantiate a single filter from a dictionary config."""
@@ -155,6 +214,13 @@ class FilterBank:
             except (ValueError, TypeError):
                 LOGGER.warning("Invalid StepLimit threshold '%s' for '%s'", threshold, var_name)
             return NoFilter()
+
+        elif ftype == "Freshness":
+            trigger = filter_cfg.get("trigger")
+            if trigger:
+                return FreshnessFilter(str(trigger))
+            else:
+                 LOGGER.warning("Freshness filter for '%s' missing 'trigger'", var_name)
 
         # Type "None" or unknown
         return NoFilter()

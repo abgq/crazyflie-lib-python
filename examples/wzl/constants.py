@@ -28,16 +28,12 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
         "variables": [
             {
                 "name": "dw1k.rangingCounter",
-                # "filter": [
-                #     {
-                #         "type": "StepLimit",
-                #         "threshold": 1000
-                #     },
-                #     {
-                #         "type": "SMA",
-                #         "window": 5
-                #     }
-                # ]
+                "filter": [
+                    # 1. Reject if measurementNumber hasn't changed (Dedup)
+                    { "type": "Freshness", "trigger": "dw1k.measurementNumber" },
+                    # 2. Reject if value jumps too much (Outlier)
+                    { "type": "StepLimit", "threshold": 1000 }
+                ]
             },
             {
                 "name": "dw1k.measurementNumber",
