@@ -281,6 +281,7 @@ class IdleBehavior(Behavior):
     def on_start(self) -> None:
         time.sleep(2.0)  # Allow time for stabilization
         self._log.info("IdleBehavior started: no motion commands will be sent")
+    
     def on_stop(self) -> None:
         self._log.info("IdleBehavior stopped")
 
@@ -290,11 +291,12 @@ class IdleBehavior(Behavior):
         vbattery = sample.values.get("pm.vbat")
         alt = sample.values.get("kalman.stateZ")
 
-        if alt is None or vbattery is None or raw is None:
+        if raw is None:
+            self._log.warning("IdleBehavior: Missing UWB counter; skipping log")
             return
         
         now = time.monotonic()
-        if now - self._last_log >= 0.0:
+        if now - self._last_log >= -1.0:
             self._last_log = now
             self._log.info(
                 "IdleBehavior: Altitude: %.2f m, UWB counter: %s, Battery: %.2f V",

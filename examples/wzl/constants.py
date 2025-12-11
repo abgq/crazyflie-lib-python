@@ -13,15 +13,15 @@ CF_URI: str = "radio://0/80/2M/E7E7E7E7E7"
 """Default Crazyflie URI. Update this to match the actual link configuration."""
 
 LOG_CONFIGS: List[Dict[str, Any]] = [
-    # {
-    #     "name": "power",
-    #     "period_ms": 1000,  # 1 Hz logging
-    #     "variables": [
-    #         {
-    #             "name": "pm.vbat",
-    #         },
-    #     ],
-    # },
+    {
+        "name": "Power",
+        "period_ms": 1000,  # 1 Hz logging
+        "variables": [
+            {
+                "name": "pm.vbat",
+            },
+        ],
+    },
     {
         "name": "UWB",
         "period_ms": 10,  # 100 Hz logging
@@ -34,7 +34,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
                     # 2. Reject if value jumps too much (Outlier)
                     { "type": "StepLimit", "threshold": 1000 },
                     # 3. Smooth with SMA (Noise reduction)
-                    { "type": "SMA", "window": 2 },
+                    { "type": "SMA", "window": 10 },
                 ]
             },
             {
@@ -42,15 +42,15 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
             }
         ],
     },
-    # {
-    #     "name": "state",
-    #     "period_ms": 100,  # 10 Hz logging
-    #     "variables": [
-    #         {
-    #             "name": "kalman.stateZ",
-    #         },
-    #     ],
-    # },
+    {
+        "name": "Position",
+        "period_ms": 100,  # 10 Hz logging
+        "variables": [
+            {
+                "name": "kalman.stateZ",
+            },
+        ],
+    },
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 

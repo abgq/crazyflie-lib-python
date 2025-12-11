@@ -104,7 +104,7 @@ class CrazyflieController:
                 try:
                     # Block until a sample arrives or timeout expires
                     self._last_sample = self._queue.get(timeout=max(0, timeout))
-                    LOGGER.info("Sample received:\n    %s", self._format_sample(self._last_sample))
+                    # LOGGER.info("Sample received:\n    %s", self._format_sample(self._last_sample))
                     # Loop back immediately to process next sample
                     continue
 
@@ -149,7 +149,7 @@ class CrazyflieController:
         parts = []
         for key, value in sorted(sample.values.items()):
             if value is None:
-                continue  # Skip None values
+                formatted_value = "        None"
             elif isinstance(value, float):
                 formatted_value = f"{value:12.6f}"
             else:
