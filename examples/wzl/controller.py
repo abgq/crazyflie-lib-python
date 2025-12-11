@@ -99,31 +99,48 @@ class CrazyflieController:
         try:
             while not self._stop_event.is_set():
                 now = time.monotonic()
-                timeout = next_control_time - now
+                sleep_time = next_control_time - now
                 
-                try:
-                    # Block until a sample arrives or timeout expires
-                    self._last_sample = self._queue.get(timeout=max(0, timeout))
-                    # LOGGER.info("Sample received:\n    %s", self._format_sample(self._last_sample))
-                    # Loop back immediately to process next sample
-                    continue
+                # Wait for the next control cycle (timer-based)
+                self._stop_event.wait(max(0, sleep_time))
 
-                except Empty:
-                    # Timeout expired, proceed to control step
-                    pass
+                # 1. DRAIN AND MERGE
+                # Collect all samples that arrived during the sleep
+                pending_sample = None
+                while True:
+                    try:
+                        new_sample = self._queue.get_nowait()
 
-                # Control Step
-                if time.monotonic() >= next_control_time:
-                    if self._last_sample is not None:
-                        if self._check_safety(self._last_sample):
-                            break
-                        self._step(self._last_sample)
+                        LOGGER.info("Controller received sample: %s", self._format_sample(new_sample))
 
-                    next_control_time += period_s
+                        if pending_sample is None:
+                            pending_sample = new_sample
+                        else:
+                            # Generic Merge: Update only what is fresh
+                            for k, v in new_sample.values.items():
+                                if v is not None:
+                                    pending_sample.values[k] = v
+                            pending_sample.timestamp = new_sample.timestamp
 
-                    # Handle scheduling drift
-                    if next_control_time < time.monotonic():
-                        next_control_time = time.monotonic() + period_s
+                    except Empty:
+                        break
+
+                # 2. UPDATE STATE (if we got fresh data)
+                if pending_sample is not None:
+                    self._last_sample = pending_sample
+
+                # 3. CONTROL STEP
+                # Even if we didn't get new data, we step with the old data (Zero-Order Hold)
+                if self._last_sample is not None:
+                    if self._check_safety(self._last_sample):
+                        break
+                    self._step(self._last_sample)
+
+                next_control_time += period_s
+
+                # Handle scheduling drift
+                if next_control_time < time.monotonic():
+                    next_control_time = time.monotonic() + period_s
 
         except Exception:  # noqa: BLE001
             LOGGER.exception("Controller loop crashed; requesting stop")

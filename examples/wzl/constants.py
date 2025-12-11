@@ -34,7 +34,7 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
                     # 2. Reject if value jumps too much (Outlier)
                     { "type": "StepLimit", "threshold": 1000 },
                     # 3. Smooth with SMA (Noise reduction)
-                    { "type": "SMA", "window": 10 },
+                    { "type": "SMA", "window": 1 },
                 ]
             },
             {
@@ -60,7 +60,7 @@ CONTROL_PERIOD_MS: int = 100
 VBAT_MIN: float = 3.3
 """Minimum safe battery voltage, in volts."""
 
-QUEUE_MAX_SIZE: int = 1
+QUEUE_MAX_SIZE: int = 50
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
 CONTROLLER_MODE: str = "idle"
