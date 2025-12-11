@@ -60,7 +60,7 @@ CONTROL_PERIOD_MS: int = 100
 VBAT_MIN: float = 3.3
 """Minimum safe battery voltage, in volts."""
 
-QUEUE_MAX_SIZE: int = 1
+QUEUE_MAX_SIZE: int = 50
 """Maximum number of :class:`SensorSample` objects retained in the queue."""
 
 CONTROLLER_MODE: str = "idle"
