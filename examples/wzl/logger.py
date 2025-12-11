@@ -108,8 +108,7 @@ class CrazyflieLogger:
             return
 
         now = time.monotonic()
-        LOGGER.info("Time: %10.3f - Raw data from '%s': %s", now, logconf.name, data)
-
+        
         # 1. Update State with RAW data (The "Zero-Order Hold")
         with self._lock:
             self._latest_values.update(data)

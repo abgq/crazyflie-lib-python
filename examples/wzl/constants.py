@@ -13,15 +13,15 @@ CF_URI: str = "radio://0/80/2M/E7E7E7E7E7"
 """Default Crazyflie URI. Update this to match the actual link configuration."""
 
 LOG_CONFIGS: List[Dict[str, Any]] = [
-    {
-        "name": "power",
-        "period_ms": 1000,  # 1 Hz logging
-        "variables": [
-            {
-                "name": "pm.vbat",
-            },
-        ],
-    },
+    # {
+    #     "name": "power",
+    #     "period_ms": 1000,  # 1 Hz logging
+    #     "variables": [
+    #         {
+    #             "name": "pm.vbat",
+    #         },
+    #     ],
+    # },
     {
         "name": "UWB",
         "period_ms": 10,  # 100 Hz logging
@@ -32,7 +32,9 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
                     # 1. Reject if measurementNumber hasn't changed (Dedup)
                     { "type": "Freshness", "trigger": "dw1k.measurementNumber" },
                     # 2. Reject if value jumps too much (Outlier)
-                    { "type": "StepLimit", "threshold": 1000 }
+                    { "type": "StepLimit", "threshold": 1000 },
+                    # 3. Smooth with SMA (Noise reduction)
+                    { "type": "SMA", "window": 2 },
                 ]
             },
             {

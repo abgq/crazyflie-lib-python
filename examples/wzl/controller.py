@@ -104,7 +104,7 @@ class CrazyflieController:
                 try:
                     # Block until a sample arrives or timeout expires
                     self._last_sample = self._queue.get(timeout=max(0, timeout))
-
+                    LOGGER.info("Sample received:\n    %s", self._format_sample(self._last_sample))
                     # Loop back immediately to process next sample
                     continue
 
@@ -139,6 +139,24 @@ class CrazyflieController:
             self._stop_event.set()
             return True
         return False
+
+    def _format_sample(self, sample: SensorSample) -> str:
+        """Format sample values with aligned columns for easy reading."""
+        if not sample.values:
+            return "{}"
+        
+        # Format each key-value pair with aligned columns on a single line
+        parts = []
+        for key, value in sorted(sample.values.items()):
+            if value is None:
+                continue  # Skip None values
+            elif isinstance(value, float):
+                formatted_value = f"{value:12.6f}"
+            else:
+                formatted_value = f"{value:>12}"
+            parts.append(f"{key}: {formatted_value}")
+        
+        return "  |  ".join(parts)
 
     def _step(self, sample: SensorSample) -> None:
         """Execute a single logical step by delegating to the active behavior."""
