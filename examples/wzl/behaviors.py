@@ -84,8 +84,12 @@ class Behavior(ABC):
         """Hook executed before the control loop thread starts."""
 
     @abstractmethod
-    def step(self, sample: SensorSample) -> None:
-        """Execute one control step based on the latest sample."""
+    def step(self, sample: SensorSample) -> Dict[str, Any]:
+        """Execute one control step based on the latest sample.
+
+        Returns:
+            A dictionary of internal metrics for visualization/debugging.
+        """
 
     @abstractmethod
     def on_stop(self) -> None:
@@ -285,7 +289,7 @@ class IdleBehavior(Behavior):
     def on_stop(self) -> None:
         self._log.info("IdleBehavior stopped")
 
-    def step(self, sample: SensorSample) -> None:
+    def step(self, sample: SensorSample) -> Dict[str, Any]:
         """Log battery and UWB counter at a low rate without crashing on None."""
         raw = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
@@ -293,7 +297,7 @@ class IdleBehavior(Behavior):
 
         if raw is None:
             self._log.warning("IdleBehavior: Missing UWB counter; skipping log")
-            return
+            return {}
         
         now = time.monotonic()
         if now - self._last_log >= -1.0:
@@ -304,6 +308,7 @@ class IdleBehavior(Behavior):
                 int(raw),
                 float(vbattery),
             )
+        return {}
 
 class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
@@ -336,13 +341,13 @@ class RunAndTumbleBehavior(Behavior):
             self._log.exception("RunAndTumbleBehavior failed to start")
             self._active = False
 
-    def step(self, sample: SensorSample) -> None:
+    def step(self, sample: SensorSample) -> Dict[str, Any]:
         if not self._active:
-            return
+            return {}
         
         if not self.run_quadrant_check_step(sample):
             # Still running quadrant check
-            return
+            return {}
 
         counter = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")
@@ -350,7 +355,7 @@ class RunAndTumbleBehavior(Behavior):
 
         if counter is None or vbattery is None or alt is None:
             self._log.warning("Missing rangingCounter, vbat, or altitude in sample; ignoring")
-            return
+            return {}
 
         if isinstance(alt, (int, float)):
             self._last_altitude = float(alt)
@@ -380,7 +385,7 @@ class RunAndTumbleBehavior(Behavior):
                 self._log.exception("Error during manual landing sequence")
             finally:
                 self._active = False
-            return
+            return {}
 
         # Initialize previous counter if needed
         if self._prev_counter is None:
@@ -389,7 +394,7 @@ class RunAndTumbleBehavior(Behavior):
             self._cf.commander.send_hover_setpoint(self.SEARCH_VELOCITY_MPS * 0.5, 0.0, 0.0, self.FLIGHT_HEIGHT)
             self._last_vx = self.SEARCH_VELOCITY_MPS * 0.5
             self._last_yaw_rate = 0.0
-            return
+            return {}
 
         delta_r = counter - self._prev_counter
         self._prev_counter = counter
@@ -399,16 +404,19 @@ class RunAndTumbleBehavior(Behavior):
         vx = self._last_vx
         yaw_rate = self._last_yaw_rate
 
+        state_label = "unknown"
         if delta_r < -threshold:
             # Getting closer (Run)
             self._log.info("Run: delta_r=%.2f < -%.2f", delta_r, threshold)
             vx = self.SEARCH_VELOCITY_MPS
             yaw_rate = 0.0
+            state_label = "run"
         elif delta_r > threshold:
             # Getting further (Tumble)
             self._log.info("Tumble: delta_r=%.2f > %.2f", delta_r, threshold)
             vx = self.SEARCH_VELOCITY_MPS * 0.5
             yaw_rate = self.TUMBLE_RATE_DEG_S
+            state_label = "tumble"
         else:
             # Noise/Deadband: Maintain previous
             pass
@@ -418,6 +426,12 @@ class RunAndTumbleBehavior(Behavior):
 
         # Actuation
         self._cf.commander.send_hover_setpoint(vx, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
+
+        return {
+            'state': state_label,
+            'gradient': delta_r,
+            'yaw_cmd': yaw_rate
+        }
 
     def on_stop(self) -> None:
         """Stop, land, and disarm safely."""
@@ -469,9 +483,9 @@ class SinusoidalBehavior(Behavior):
             self._log.exception("SinusoidalBehavior failed to start")
             self._active = False
 
-    def step(self, sample: SensorSample) -> None:
+    def step(self, sample: SensorSample) -> Dict[str, Any]:
         if not self._active:
-            return
+            return {}
         
         # if not self.run_quadrant_check_step(sample):
         #     # Still running quadrant check
@@ -484,7 +498,7 @@ class SinusoidalBehavior(Behavior):
 
         if counter is None or alt is None or vbattery is None:
             self._log.warning("Missing rangingCounter, altitude, or battery voltage in sample; ignoring")
-            return
+            return {}
 
         self._last_altitude = float(alt)
         counter = int(counter)
@@ -508,7 +522,7 @@ class SinusoidalBehavior(Behavior):
             self._log.info("Target reached (%d < %d). Landing.", counter, self.TARGET_DIST_COUNTER)
             self.land()
             self._active = False
-            return
+            return {}
 
         # Algorithm (Extremum Seeking)
         # 1. Check prev_dist
@@ -516,7 +530,7 @@ class SinusoidalBehavior(Behavior):
             self._prev_counter = counter
             # Hover in place while initializing history
             self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
-            return
+            return {}
 
         # 3. Calculate sinusoidal perturbation
         now = time.monotonic()
@@ -550,6 +564,12 @@ class SinusoidalBehavior(Behavior):
 
         # 9. Update prev_dist
         self._prev_counter = counter
+
+        return {
+            'bias': self._bias,
+            'dither': dither,
+            'yaw_cmd': yaw_cmd
+        }
 
     def on_stop(self) -> None:
         """Stop hook: Execute safe landing if not already done."""

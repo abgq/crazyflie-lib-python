@@ -68,6 +68,46 @@ CONTROLLER_MODE: str = "idle"
 Default controller mode. Options: 'idle', 'run_tumble', and 'sinusoidal'. Default is 'idle'.
 """
 
+DASHBOARD_CONFIG: Dict[str, Any] = {
+    "window_title": "Crazyflie Observer",
+    "refresh_rate_ms": 50,  # 20 FPS
+    "buffer_size": 200,     # History length
+    "layout": [
+        # Row 1
+        [
+            {
+                "type": "plot",
+                "title": "Altitude Control",
+                "ylabel": "Height (m)",
+                "traces": [
+                    {"source": "sensors.kalman.stateZ", "color": "w", "width": 2, "name": "Z-Meas"},
+                ]
+            },
+            {
+                "type": "text",
+                "title": "Telemetry",
+                "fields": [
+                    {"label": "Battery", "source": "sensors.pm.vbat", "fmt": "{:.2f} V", "color": "#FF0000"},
+                    {"label": "Mode", "source": "meta.mode", "fmt": "{}"}
+                ]
+            }
+        ],
+        # Row 2
+        [
+            {
+                "type": "plot",
+                "title": "Internal State",
+                "traces": [
+                    {"source": "behavior.bias", "color": "g", "name": "Bias"},
+                    {"source": "behavior.dither", "color": "c", "name": "Dither"},
+                    {"source": "behavior.yaw_cmd", "color": "m", "name": "Yaw Cmd"},
+                    {"source": "behavior.gradient", "color": "y", "name": "Gradient"},
+                ]
+            }
+        ]
+    ]
+}
+
 # --- DW1000 / UWB calibration constants ---
 
 # Speed of light in vacuum [m/s]. Feel free to tweak if you want to be pedantic.
@@ -93,6 +133,7 @@ __all__ = [
     "VBAT_MIN",
     "QUEUE_MAX_SIZE",
     "CONTROLLER_MODE",
+    "DASHBOARD_CONFIG",
     "SPEED_OF_LIGHT",
     "DW1K_ANTENNA_DELAY_RC",
     "DW1K_RC_TO_SECONDS",

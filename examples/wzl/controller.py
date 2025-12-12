@@ -6,7 +6,8 @@ import logging
 import numbers
 import threading
 import time
-from queue import Empty, Queue
+import multiprocessing
+from queue import Empty, Full, Queue
 from typing import Any, Dict, Iterable, Optional
 
 from behaviors import Behavior, get_behavior
@@ -33,6 +34,7 @@ class CrazyflieController:
         sample_queue: Queue[SensorSample],
         mode: str = CONTROLLER_MODE,
         log_configs: Iterable[Dict[str, Any]] | None = None,
+        plotter_queue: Optional[multiprocessing.Queue] = None,
     ) -> None:
         """
         Args:
@@ -40,11 +42,13 @@ class CrazyflieController:
             sample_queue: Queue populated by :class:`CrazyflieLogger`.
             mode: Controller mode string (e.g. ``idle`` or a future ``demo_motion``).
             log_configs: Logging configuration in sync with :class:`CrazyflieLogger`.
+            plotter_queue: Optional queue to push visualization packets to.
         """
         self._cf = cf
         self._queue = sample_queue
         self._mode = mode
         self._log_configs = list(log_configs or LOG_CONFIGS)
+        self._plotter_queue = plotter_queue
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -178,7 +182,34 @@ class CrazyflieController:
     def _step(self, sample: SensorSample) -> None:
         """Execute a single logical step by delegating to the active behavior."""
         try:
-            self._behavior.step(sample)
+            behavior_metrics = self._behavior.step(sample)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Behavior.step() raised an exception")
             self._stop_event.set()
+            return
+
+        # Prepare visualization packet if plotter is attached
+        if self._plotter_queue is not None:
+            try:
+                vis_packet: Dict[str, Any] = {
+                    "meta.timestamp": sample.timestamp,
+                    "meta.mode": self._mode,
+                }
+
+                # Flatten sensor data
+                for k, v in sample.values.items():
+                    vis_packet[f"sensors.{k}"] = v
+
+                # Flatten behavior metrics
+                for k, v in behavior_metrics.items():
+                    vis_packet[f"behavior.{k}"] = v
+
+                # Push to queue (non-blocking)
+                try:
+                    self._plotter_queue.put_nowait(vis_packet)
+                except Full:
+                    # Drop packet if queue is full to avoid blocking control loop
+                    pass
+            except Exception:
+                # Catch-all to prevent visualization errors from crashing controller
+                LOGGER.exception("Error preparing/sending visualization packet")
