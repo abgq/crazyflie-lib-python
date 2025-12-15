@@ -7,7 +7,7 @@ import numbers
 import threading
 import time
 from queue import Empty, Queue
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, List
 
 from behaviors import Behavior, get_behavior
 from constants import (
@@ -16,7 +16,8 @@ from constants import (
     LOG_CONFIGS,
     VBAT_MIN,
 )
-from logger import SensorSample
+from models import SensorSample, LogBlockConfig
+from interfaces import DroneInterface
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,19 +30,19 @@ class CrazyflieController:
 
     def __init__(
         self,
-        cf: "cflib.crazyflie.Crazyflie",
+        drone: DroneInterface,
         sample_queue: Queue[SensorSample],
         mode: str = CONTROLLER_MODE,
-        log_configs: Iterable[Dict[str, Any]] | None = None,
+        log_configs: List[LogBlockConfig] | None = None,
     ) -> None:
         """
         Args:
-            cf: Connected Crazyflie instance.
+            drone: DroneInterface instance.
             sample_queue: Queue populated by :class:`CrazyflieLogger`.
             mode: Controller mode string (e.g. ``idle`` or a future ``demo_motion``).
             log_configs: Logging configuration in sync with :class:`CrazyflieLogger`.
         """
-        self._cf = cf
+        self._drone = drone
         self._queue = sample_queue
         self._mode = mode
         self._log_configs = list(log_configs or LOG_CONFIGS)
@@ -49,7 +50,7 @@ class CrazyflieController:
         self._thread: Optional[threading.Thread] = None
 
         self._last_sample: Optional[SensorSample] = None
-        self._behavior: Behavior = get_behavior(mode, cf)
+        self._behavior: Behavior = get_behavior(mode, drone)
         self._behavior_stopped = False
 
     def start(self) -> None:

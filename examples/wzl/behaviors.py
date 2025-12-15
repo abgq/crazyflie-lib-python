@@ -7,7 +7,8 @@ import math
 import time
 from abc import ABC, abstractmethod
 
-from logger import SensorSample
+from models import SensorSample
+from interfaces import DroneInterface
 
 from constants import (
     SPEED_OF_LIGHT,
@@ -15,8 +16,6 @@ from constants import (
     DW1K_RC_TO_SECONDS,
     DW1K_TOF_SCALING
 )
-
-from cflib.crazyflie import Crazyflie
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,8 +65,8 @@ class Behavior(ABC):
     QC_STABILIZE_TIME = 0.5 # seconds
     QC_TURN_SPEED = 30.0    # deg/s
     
-    def __init__(self, cf: "Crazyflie") -> None:
-        self._cf = cf
+    def __init__(self, drone: DroneInterface) -> None:
+        self.drone = drone
         self._log = logging.getLogger(self.__class__.__name__)
         self._last_altitude: float | None = None
 
@@ -93,20 +92,20 @@ class Behavior(ABC):
 
     def take_off(self, target_height: float, duration: float = 2.0) -> None:
         """Execute a blocking takeoff sequence."""
-        self._cf.platform.send_arming_request(True)
-        time.sleep(2.0)  # Allow time for arming
+        self.drone.arm(True)
+        self.drone.sleep(2.0)  # Allow time for arming
         self._log.info("Taking off to %.2f m over %.1f s", target_height, duration)
         steps = int(duration / self.LANDING_SLEEP)
         for i in range(steps):
             ratio = (i + 1) / steps
             current_height = target_height * ratio
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-            time.sleep(self.LANDING_SLEEP)
+            self.drone.cmd_hover(0.0, 0.0, 0.0, current_height)
+            self.drone.sleep(self.LANDING_SLEEP)
 
         # Stabilize at top
         for _ in range(self.STABILIZE_STEPS):
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, target_height)
-            time.sleep(self.LANDING_SLEEP)
+            self.drone.cmd_hover(0.0, 0.0, 0.0, target_height)
+            self.drone.sleep(self.LANDING_SLEEP)
 
     def land(self) -> None:
         """Execute a blocking landing sequence using the last known altitude."""
@@ -119,8 +118,8 @@ class Behavior(ABC):
 
         # Stabilize
         for _ in range(self.STABILIZE_STEPS):
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, start_h)
-            time.sleep(self.LANDING_SLEEP)
+            self.drone.cmd_hover(0.0, 0.0, 0.0, start_h)
+            self.drone.sleep(self.LANDING_SLEEP)
 
         # Ramp down
         end_h = self.LANDING_HEIGHT
@@ -131,18 +130,18 @@ class Behavior(ABC):
             for i in range(steps):
                 ratio = (i + 1) / steps
                 current_height = start_h - (start_h - end_h) * ratio
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, current_height)
-                time.sleep(self.LANDING_SLEEP)
+                self.drone.cmd_hover(0.0, 0.0, 0.0, current_height)
+                self.drone.sleep(self.LANDING_SLEEP)
 
         # Cut Power
         try:
-            self._cf.commander.send_stop_setpoint()
+            self.drone.stop()
         except Exception:
             self._log.warning("Failed to send stop setpoint", exc_info=True)
 
         # Disarm
         try:
-            self._cf.platform.send_arming_request(False)
+            self.drone.arm(False)
         except Exception:
             self._log.warning("Failed to disarm", exc_info=True)
 
@@ -188,7 +187,7 @@ class Behavior(ABC):
                 self._log.info("Quadrant Check: Starting sequence")
                 next_state()
             else:
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                self.drone.cmd_hover(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
             return False
 
         # --- Scan Legs (States 1-16) ---
@@ -235,7 +234,7 @@ class Behavior(ABC):
                         self._log.info("Quadrant Check: All legs done. Scores: %s", self._qc_scores)
                     next_state()
 
-            self._cf.commander.send_hover_setpoint(vx, vy, 0.0, self.FLIGHT_HEIGHT)
+            self.drone.cmd_hover(vx, vy, 0.0, self.FLIGHT_HEIGHT)
             return False
 
         # --- Calculation & Alignment (State 17) ---
@@ -263,23 +262,23 @@ class Behavior(ABC):
             # Note: _qc_timer was reset when entering state 17 (from state 16 transition)
             if self.sleep_nb(turn_duration):
                 self._log.info("Quadrant Check: Alignment complete")
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+                self.drone.cmd_hover(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
                 self._qc_state = 20 # Done
                 self.sleep_timer = now
             else:
-                self._cf.commander.send_hover_setpoint(0.0, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
+                self.drone.cmd_hover(0.0, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
                 return False
         return False
 
 class IdleBehavior(Behavior):
     """Safe default behavior that performs no motion commands."""
 
-    def __init__(self, cf: "Crazyflie") -> None:
-        super().__init__(cf)
+    def __init__(self, drone: DroneInterface) -> None:
+        super().__init__(drone)
         self._last_log = 0.0
 
     def on_start(self) -> None:
-        time.sleep(2.0)  # Allow time for stabilization
+        self.drone.sleep(2.0)  # Allow time for stabilization
         self._log.info("IdleBehavior started: no motion commands will be sent")
     
     def on_stop(self) -> None:
@@ -314,8 +313,8 @@ class RunAndTumbleBehavior(Behavior):
     GRADIENT_THRESHOLD_COUNTER: float = 5   # Sensitivity to distance change (counters)
     TARGET_COUNTER: float = 66200           # Distance to stop from anchor (counters) 
 
-    def __init__(self, cf: "Crazyflie") -> None:
-        super().__init__(cf)
+    def __init__(self, drone: DroneInterface) -> None:
+        super().__init__(drone)
         self._active: bool = False
         self._prev_counter: float | None = None
         self._last_log: float = 0.0
@@ -386,7 +385,7 @@ class RunAndTumbleBehavior(Behavior):
         if self._prev_counter is None:
             self._prev_counter = counter
             # Default to slow search if no history
-            self._cf.commander.send_hover_setpoint(self.SEARCH_VELOCITY_MPS * 0.5, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            self.drone.cmd_hover(self.SEARCH_VELOCITY_MPS * 0.5, 0.0, 0.0, self.FLIGHT_HEIGHT)
             self._last_vx = self.SEARCH_VELOCITY_MPS * 0.5
             self._last_yaw_rate = 0.0
             return
@@ -417,7 +416,7 @@ class RunAndTumbleBehavior(Behavior):
         self._last_yaw_rate = yaw_rate
 
         # Actuation
-        self._cf.commander.send_hover_setpoint(vx, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
+        self.drone.cmd_hover(vx, 0.0, yaw_rate, self.FLIGHT_HEIGHT)
 
     def on_stop(self) -> None:
         """Stop, land, and disarm safely."""
@@ -446,8 +445,8 @@ class SinusoidalBehavior(Behavior):
 
     UPDATE_BIAS_EVERY_N = 5          # Update bias every Nth step
 
-    def __init__(self, cf: "Crazyflie") -> None:
-        super().__init__(cf)
+    def __init__(self, drone: DroneInterface) -> None:
+        super().__init__(drone)
         self._bias = 0.0
         self._prev_counter: int | None = None
         self._active = False
@@ -458,10 +457,10 @@ class SinusoidalBehavior(Behavior):
     def on_start(self) -> None:
         """Arm, takeoff, and prepare for sinusoidal control."""
         try:
-            self._cf.platform.send_arming_request(True)
-            time.sleep(1.0)  # Allow time for arming
+            self.drone.arm(True)
+            self.drone.sleep(1.0)  # Allow time for arming
             self.take_off(self.FLIGHT_HEIGHT)
-            time.sleep(1.0)  # Allow time for stabilization
+            self.drone.sleep(1.0)  # Allow time for stabilization
             self._active = True
             self.init_quadrant_check()
             self._log.info("SinusoidalBehavior started")
@@ -515,7 +514,7 @@ class SinusoidalBehavior(Behavior):
         if self._prev_counter is None:
             self._prev_counter = counter
             # Hover in place while initializing history
-            self._cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
+            self.drone.cmd_hover(0.0, 0.0, 0.0, self.FLIGHT_HEIGHT)
             return
 
         # 3. Calculate sinusoidal perturbation
@@ -546,7 +545,7 @@ class SinusoidalBehavior(Behavior):
         self._log.info("Dither: %.3f, Bias: %.3f, Yaw Cmd: %.2f deg", dither, self._bias, yaw_cmd)
 
         # 8. Actuate
-        self._cf.commander.send_hover_setpoint(self.VELOCITY_MPS, 0.0, yaw_cmd, self.FLIGHT_HEIGHT)
+        self.drone.cmd_hover(self.VELOCITY_MPS, 0.0, yaw_cmd, self.FLIGHT_HEIGHT)
 
         # 9. Update prev_dist
         self._prev_counter = counter
@@ -557,7 +556,7 @@ class SinusoidalBehavior(Behavior):
             self.land()
             self._active = False
 
-def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
+def get_behavior(mode: str, drone: DroneInterface) -> Behavior:
     """Return a behavior instance for the requested mode."""
     normalized = (mode or "idle").strip().lower()
     mapping = {
@@ -570,7 +569,7 @@ def get_behavior(mode: str, cf: "Crazyflie") -> Behavior:
     behavior_cls = mapping.get(normalized, IdleBehavior)
     if behavior_cls is IdleBehavior and normalized not in mapping:
         LOGGER.warning("Unknown controller mode '%s'; falling back to idle", mode)
-    return behavior_cls(cf)
+    return behavior_cls(drone)
 
 __all__ = [
     "Behavior",
