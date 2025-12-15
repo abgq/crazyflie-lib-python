@@ -56,7 +56,7 @@ class Behavior(ABC):
     LANDING_HEIGHT = 0.05
     LANDING_STEPS = 20
     LANDING_SLEEP = 0.1
-    STABILIZE_STEPS = 10
+    STABILIZE_STEPS = 20
     FLIGHT_HEIGHT = 0.5  # Default flight height in meters
 
     # Quadrant Check Constants
@@ -299,7 +299,7 @@ class IdleBehavior(Behavior):
         if now - self._last_log >= -1.0:
             self._last_log = now
             self._log.info(
-                "IdleBehavior: Altitude: %.2f m, UWB counter: %s, Battery: %.2f V",
+                "IdleBehavior: Altitude: %f m, UWB counter: %s, Battery: %.2f V",
                 float(alt),
                 int(raw),
                 float(vbattery),
@@ -309,10 +309,10 @@ class RunAndTumbleBehavior(Behavior):
     """Reactive control strategy using Run & Tumble logic."""
     
     # --- Control Parameters for Run & Tumble ---
-    SEARCH_VELOCITY_MPS: float = 0.3        # Forward speed when running
-    TUMBLE_RATE_DEG_S: float = 45           # Yaw rate when tumbling (searching)
-    GRADIENT_THRESHOLD_COUNTER: float = 6   # Sensitivity to distance change (counters)
-    TARGET_COUNTER: float = 66250           # Distance to stop from anchor (counters) 
+    SEARCH_VELOCITY_MPS: float = 0.25        # Forward speed when running
+    TUMBLE_RATE_DEG_S: float = 60           # Yaw rate when tumbling (searching)
+    GRADIENT_THRESHOLD_COUNTER: float = 5   # Sensitivity to distance change (counters)
+    TARGET_COUNTER: float = 66200           # Distance to stop from anchor (counters) 
 
     def __init__(self, cf: "Crazyflie") -> None:
         super().__init__(cf)
@@ -340,9 +340,9 @@ class RunAndTumbleBehavior(Behavior):
         if not self._active:
             return
         
-        if not self.run_quadrant_check_step(sample):
-            # Still running quadrant check
-            return
+        # if not self.run_quadrant_check_step(sample):
+        #     # Still running quadrant check
+        #     return
 
         counter = sample.values.get("dw1k.rangingCounter")
         vbattery = sample.values.get("pm.vbat")

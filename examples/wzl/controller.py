@@ -111,7 +111,7 @@ class CrazyflieController:
                     try:
                         new_sample = self._queue.get_nowait()
 
-                        LOGGER.info("Controller received sample: %s", self._format_sample(new_sample))
+                        # LOGGER.info("Controller received sample: %s", self._format_sample(new_sample))
 
                         if pending_sample is None:
                             pending_sample = new_sample

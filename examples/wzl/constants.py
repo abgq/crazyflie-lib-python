@@ -33,8 +33,8 @@ LOG_CONFIGS: List[Dict[str, Any]] = [
                     { "type": "Freshness", "trigger": "dw1k.measurementNumber" },
                     # 2. Reject if value jumps too much (Outlier)
                     { "type": "StepLimit", "threshold": 1000 },
-                    # 3. Smooth with SMA (Noise reduction)
-                    { "type": "SMA", "window": 1 },
+                    # 3. Smooth with EMA (Noise reduction)
+                    { "type": "EMA", "alpha": 0.6 },
                 ]
             },
             {
