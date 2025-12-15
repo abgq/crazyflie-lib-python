@@ -5,25 +5,17 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from queue import Empty, Full, Queue
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-import numbers
+from typing import Any, Dict, List, Optional, Tuple
 
 from cflib.crazyflie.log import LogConfig
 
 from constants import LOG_CONFIGS
 from filters import FilterBank
+from models import LogBlockConfig, LogVariableConfig, SensorSample
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class SensorSample:
-    """Snapshot of the latest Crazyflie log values."""
-    timestamp: float
-    values: Dict[str, Any]
 
 
 class CrazyflieLogger:
@@ -33,7 +25,7 @@ class CrazyflieLogger:
         self,
         cf: "cflib.crazyflie.Crazyflie",
         sample_queue: Queue[SensorSample],
-        log_configs: Iterable[Dict[str, Any]] | None = None,
+        log_configs: List[LogBlockConfig] | None = None,
     ) -> None:
         """
         Prepare the logger.
@@ -59,20 +51,18 @@ class CrazyflieLogger:
             return
 
         self._running = True
-        for raw_cfg in self._log_configs:
-            cfg = dict(raw_cfg)
-            name = cfg.get("name", "unnamed")
-            period_ms = int(cfg.get("period_ms", 100))
-            variables = cfg.get("variables", [])
+        for cfg in self._log_configs:
+            name = cfg.name
+            period_ms = cfg.period_ms
+            variables = cfg.variables
             if not variables:
                 LOGGER.warning("Skipping log config '%s' without variables", name)
                 continue
 
             logconf = LogConfig(name=name, period_in_ms=period_ms)
             for entry in variables:
-                var_name, fetch_as = self._parse_variable_entry(entry, name)
-                if not var_name:
-                    continue
+                var_name = entry.name
+                fetch_as = entry.fetch_as
                 try:
                     logconf.add_variable(var_name, fetch_as)
                 except KeyError:
@@ -145,18 +135,3 @@ class CrazyflieLogger:
                 self._queue.put_nowait(sample)
             except Full:
                 LOGGER.error("Failed to push sample into full queue")
-
-    @staticmethod
-    def _parse_variable_entry(entry: Any, log_name: str) -> Tuple[Optional[str], Optional[str]]:
-        """Return the variable name and optional type override extracted from ``entry``."""
-        if isinstance(entry, str):
-            return entry, None
-        if isinstance(entry, dict):
-            name = entry.get("name")
-            if not name:
-                LOGGER.warning("Variable entry without name in log config '%s'", log_name)
-                return None, None
-            fetch_as = entry.get("fetch_as")
-            return str(name), fetch_as
-        LOGGER.warning("Unsupported variable entry %r in log config '%s'", entry, log_name)
-        return None, None

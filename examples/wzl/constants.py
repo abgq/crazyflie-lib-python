@@ -7,50 +7,46 @@ carry its own ``filter_window`` value (set to ``0`` to disable filtering).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import List
+
+from models import FilterConfig, LogBlockConfig, LogVariableConfig
 
 CF_URI: str = "radio://0/80/2M/E7E7E7E7E7"
 """Default Crazyflie URI. Update this to match the actual link configuration."""
 
-LOG_CONFIGS: List[Dict[str, Any]] = [
-    {
-        "name": "Power",
-        "period_ms": 1000,  # 1 Hz logging
-        "variables": [
-            {
-                "name": "pm.vbat",
-            },
+LOG_CONFIGS: List[LogBlockConfig] = [
+    LogBlockConfig(
+        name="Power",
+        period_ms=1000,  # 1 Hz logging
+        variables=[
+            LogVariableConfig(name="pm.vbat"),
         ],
-    },
-    {
-        "name": "UWB",
-        "period_ms": 10,  # 100 Hz logging
-        "variables": [
-            {
-                "name": "dw1k.rangingCounter",
-                "filter": [
+    ),
+    LogBlockConfig(
+        name="UWB",
+        period_ms=10,  # 100 Hz logging
+        variables=[
+            LogVariableConfig(
+                name="dw1k.rangingCounter",
+                filters=[
                     # 1. Reject if measurementNumber hasn't changed (Dedup)
-                    { "type": "Freshness", "trigger": "dw1k.measurementNumber" },
+                    FilterConfig(type="Freshness", trigger="dw1k.measurementNumber"),
                     # 2. Reject if value jumps too much (Outlier)
-                    { "type": "StepLimit", "threshold": 1000 },
+                    FilterConfig(type="StepLimit", threshold=1000),
                     # 3. Smooth with EMA (Noise reduction)
-                    { "type": "EMA", "alpha": 0.6 },
+                    FilterConfig(type="EMA", alpha=0.6),
                 ]
-            },
-            {
-                "name": "dw1k.measurementNumber",
-            }
+            ),
+            LogVariableConfig(name="dw1k.measurementNumber"),
         ],
-    },
-    {
-        "name": "Position",
-        "period_ms": 100,  # 10 Hz logging
-        "variables": [
-            {
-                "name": "kalman.stateZ",
-            },
+    ),
+    LogBlockConfig(
+        name="Position",
+        period_ms=100,  # 10 Hz logging
+        variables=[
+            LogVariableConfig(name="kalman.stateZ"),
         ],
-    },
+    ),
 ]
 """List of log block configurations consumed by :class:`CrazyflieLogger`."""
 

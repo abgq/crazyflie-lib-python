@@ -15,6 +15,7 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from constants import CF_URI, CONTROLLER_MODE, LOG_CONFIGS, QUEUE_MAX_SIZE
 from controller import CrazyflieController
 from logger import CrazyflieLogger, SensorSample
+from interfaces import CrazyflieDrone
 
 
 
@@ -37,8 +38,12 @@ def main() -> None:
         try:
             LOGGER.info("Connected to Crazyflie at %s", CF_URI)
             cf = scf.cf
+
+            # Instantiate the interface wrapper
+            drone_interface = CrazyflieDrone(cf)
+
             cf_logger = CrazyflieLogger(cf, sample_queue, LOG_CONFIGS)
-            controller = CrazyflieController(cf, sample_queue, CONTROLLER_MODE, LOG_CONFIGS)
+            controller = CrazyflieController(drone_interface, sample_queue, CONTROLLER_MODE, LOG_CONFIGS)
 
             cf_logger.start()
             time.sleep(2.0)  # Allow some time to fill the queue
