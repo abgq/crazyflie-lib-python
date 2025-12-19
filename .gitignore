@@ -25,3 +25,6 @@ docs/api/cflib
 
 #vscode config folder
 .vscode/
+
+#Ignore pycache anywhere
+**/__pycache__/*

@@ -31,7 +31,7 @@ def main() -> None:
     cflib.crtp.init_drivers()
 
     sample_queue: queue.Queue[SensorSample] = queue.Queue(maxsize=QUEUE_MAX_SIZE)
-    controller: Optional[CrazyflieController] = None
+    cf_controller: Optional[CrazyflieController] = None
     cf_logger: Optional[CrazyflieLogger] = None
 
     with SyncCrazyflie(CF_URI, cf=Crazyflie(rw_cache="./cache")) as scf:
@@ -40,27 +40,27 @@ def main() -> None:
             cf = scf.cf
 
             # Instantiate the interface wrapper
-            drone_interface = CrazyflieDrone(cf)
+            cf_interface = CrazyflieDrone(cf)
 
             cf_logger = CrazyflieLogger(cf, sample_queue, LOG_CONFIGS)
-            controller = CrazyflieController(drone_interface, sample_queue, CONTROLLER_MODE, LOG_CONFIGS)
+            cf_controller = CrazyflieController(cf_interface, sample_queue, CONTROLLER_MODE, LOG_CONFIGS)
 
             cf_logger.start()
             time.sleep(2.0)  # Allow some time to fill the queue
-            controller.start()
+            cf_controller.start()
 
             # Future GUI components can observe the same queue without
             # modifying the controller or logger.
-            while controller.is_running():
+            while cf_controller.is_running():
                 time.sleep(0.01)
         except KeyboardInterrupt:
             LOGGER.info("KeyboardInterrupt received; stopping controller")
         except Exception:  # noqa: BLE001
             LOGGER.exception("Unexpected error in main loop")
         finally:
-            if controller:
+            if cf_controller:
                 LOGGER.info("Stopping controller...")
-                controller.stop()
+                cf_controller.stop()
                 LOGGER.info("Controller stopped")
             if cf_logger:
                 LOGGER.info("Stopping logger...")

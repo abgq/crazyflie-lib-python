@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, Dict, List, Optional, Type
+from typing import Deque, Dict, List, Optional, Type, Any
 import numbers
 
 from models import FilterConfig, LogBlockConfig, LogVariableConfig, SensorSample, FilterContext
@@ -42,6 +42,7 @@ class StepLimitFilter(SignalFilter):
 
         delta = abs(value - self.last_valid_value)
         if delta > self.threshold:
+            LOGGER.debug("StepLimitFilter rejected value %f (delta %f > threshold %f)", value, delta, self.threshold)
             return None
 
         self.last_valid_value = value

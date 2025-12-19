@@ -99,7 +99,7 @@ class CrazyflieLogger:
 
         now = time.monotonic()
 
-        # LOGGER.info("Received log data from '%s' at %f: %s", logconf.name, now, data)
+        LOGGER.debug("Received log data from '%s' at %f: %s", logconf.name, now, data)
         
         # 1. Update State with RAW data (The "Zero-Order Hold")
         with self._lock:
@@ -116,7 +116,6 @@ class CrazyflieLogger:
 
         # 4. Push to Controller
         self._push_sample(sample)
-        LOGGER.debug("Logged data from '%s': %s", logconf.name, data)
 
     def _log_error_callback(self, logconf: LogConfig, msg: str) -> None:
         """Receive log errors from cflib."""
@@ -127,6 +126,7 @@ class CrazyflieLogger:
         try:
             self._queue.put_nowait(sample)
         except Full:
+            LOGGER.warning("Sample queue full; dropping oldest sample to insert new one")
             try:
                 self._queue.get_nowait()
             except Empty:

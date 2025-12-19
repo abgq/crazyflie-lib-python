@@ -33,8 +33,8 @@ LOG_CONFIGS: List[LogBlockConfig] = [
                     FilterConfig(type="Freshness", trigger="dw1k.measurementNumber"),
                     # 2. Reject if value jumps too much (Outlier)
                     FilterConfig(type="StepLimit", threshold=1000),
-                    # 3. Smooth with EMA (Noise reduction)
-                    FilterConfig(type="EMA", alpha=0.6),
+                    # 3. Smooth with SMA (Noise reduction)
+                    FilterConfig(type="SMA", window=5),
                 ]
             ),
             LogVariableConfig(name="dw1k.measurementNumber"),
@@ -42,7 +42,7 @@ LOG_CONFIGS: List[LogBlockConfig] = [
     ),
     LogBlockConfig(
         name="Position",
-        period_ms=100,  # 10 Hz logging
+        period_ms=1000,  # 1 Hz logging
         variables=[
             LogVariableConfig(name="kalman.stateZ"),
         ],
@@ -76,7 +76,7 @@ DW1K_ANTENNA_DELAY_RC: int = 17280  # TODO: set from your calibration procedure
 
 # Conversion from one ranging-counter unit to seconds. Must be derived from
 # your DW1000 setup or measured experimentally; keep as-is until calibrated.
-DW1K_RC_TO_SECONDS: float = (1.0 / 499.2e6 / 128.0)  # TODO: replace with calibrated value
+DW1K_RC_TO_SECONDS: float = (1.0 / 499.2e6 / 128.0)
 
 # Factor depending on ranging scheme (1.0 for one-way TOF, 0.5 for symmetric
 # TWR). ranging_counter_to_distance() relies on this being set correctly.
