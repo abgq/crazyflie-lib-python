@@ -6,9 +6,12 @@ import logging
 import threading
 import time
 from queue import Empty, Full, Queue
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from cflib.crazyflie.log import LogConfig
+
+if TYPE_CHECKING:
+    from recorder import DataRecorder
 
 from constants import LOG_CONFIGS
 from filters import FilterBank
@@ -26,6 +29,7 @@ class CrazyflieLogger:
         cf: "cflib.crazyflie.Crazyflie",
         sample_queue: Queue[SensorSample],
         log_configs: List[LogBlockConfig] | None = None,
+        recorder: DataRecorder | None = None,
     ) -> None:
         """
         Prepare the logger.
@@ -34,10 +38,12 @@ class CrazyflieLogger:
             cf: Connected Crazyflie instance.
             sample_queue: Queue that will receive :class:`SensorSample` objects.
             log_configs: Optional overrides for :data:`constants.LOG_CONFIGS`.
+            recorder: Optional instance of DataRecorder to archive all samples.
         """
         self._cf = cf
         self._queue = sample_queue
         self._log_configs = list(log_configs or LOG_CONFIGS)
+        self._recorder = recorder
         self._lock = threading.Lock()
         self._latest_values: Dict[str, Any] = {}
         self._logconfs: List[LogConfig] = []
@@ -109,10 +115,18 @@ class CrazyflieLogger:
         # 2. Create Sample
         sample = SensorSample(timestamp=now, values=snapshot)
 
+        # Preserve Raw Data for Plotting
+        raw_snapshot = snapshot.copy()
+        for k, v in raw_snapshot.items():
+            sample.values[f"{k}_raw"] = v
+
         # 3. Apply Filtering (Sanitize the Output)
         # This will set values to None if they are stale or outliers
         if self._filter.is_enabled():
             self._filter.process_sample(sample)
+
+        if self._recorder:
+            self._recorder.record(sample)
 
         # 4. Push to Controller
         self._push_sample(sample)
