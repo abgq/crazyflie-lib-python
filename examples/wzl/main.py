@@ -16,6 +16,8 @@ from constants import CF_URI, CONTROLLER_MODE, LOG_CONFIGS, QUEUE_MAX_SIZE
 from controller import CrazyflieController
 from logger import CrazyflieLogger, SensorSample
 from interfaces import CrazyflieDrone
+from recorder import DataRecorder
+from plotter import DataPlotter
 
 
 
@@ -31,6 +33,10 @@ def main() -> None:
     cflib.crtp.init_drivers()
 
     sample_queue: queue.Queue[SensorSample] = queue.Queue(maxsize=QUEUE_MAX_SIZE)
+
+    # Instantiate Recorder
+    recorder = DataRecorder()
+
     cf_controller: Optional[CrazyflieController] = None
     cf_logger: Optional[CrazyflieLogger] = None
 
@@ -42,7 +48,7 @@ def main() -> None:
             # Instantiate the interface wrapper
             cf_interface = CrazyflieDrone(cf)
 
-            cf_logger = CrazyflieLogger(cf, sample_queue, LOG_CONFIGS)
+            cf_logger = CrazyflieLogger(cf, sample_queue, LOG_CONFIGS, recorder=recorder)
             cf_controller = CrazyflieController(cf_interface, sample_queue, CONTROLLER_MODE, LOG_CONFIGS)
 
             cf_logger.start()
@@ -67,6 +73,30 @@ def main() -> None:
                 cf_logger.stop()
                 LOGGER.info("Logger stopped")
     LOGGER.info("Crazyflie session closed")
+
+    LOGGER.info("Generating plots...")
+
+    plot_config = [
+        {
+            "title": "UWB Data Analysis (Filtered vs Raw)",
+            "ylabel": "Ranging Counter",
+            "vars": ["dw1k.rangingCounter", "dw1k.rangingCounter_raw"]
+        },
+        {
+            "title": "Altitude",
+            "ylabel": "Height (m)",
+            "vars": ["kalman.stateZ"]
+        },
+        {
+            "title": "Battery Voltage",
+            "ylabel": "Voltage (V)",
+            "vars": ["pm.vbat"]
+        }
+    ]
+
+    plotter = DataPlotter(recorder.get_data())
+    plotter.plot(plot_config)
+
     LOGGER.info("Threads still alive: %s", threading.enumerate())
 
 
